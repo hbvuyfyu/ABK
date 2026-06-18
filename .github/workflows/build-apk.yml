@@ -23,9 +23,14 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.0'
+          flutter-version: '3.22.0'
           channel: 'stable'
           cache: true
+
+      - name: Create asset directories
+        run: |
+          mkdir -p mobile/assets/images
+          mkdir -p mobile/assets/icons
 
       - name: Get Flutter dependencies
         working-directory: mobile
@@ -37,7 +42,7 @@ jobs:
 
       - name: Rename APK
         run: |
-          mv mobile/build/app/outputs/flutter-apk/app-release.apk \
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk \
              mobile/build/app/outputs/flutter-apk/GAME_EVENT_v1.0.0.apk
 
       - name: Upload APK as artifact
@@ -46,6 +51,13 @@ jobs:
           name: GAME_EVENT_APK
           path: mobile/build/app/outputs/flutter-apk/GAME_EVENT_v1.0.0.apk
           retention-days: 30
+
+      - name: Delete old release if exists
+        run: |
+          gh release delete v1.0.0 --yes || true
+          git push --delete origin v1.0.0 || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -56,7 +68,7 @@ jobs:
             ## GAME EVENT v1.0.0
 
             ### تحميل التطبيق
-            حمّل ملف `GAME_EVENT_v1.0.0.apk` من قسم Assets أدناه
+            حمّل ملف **GAME_EVENT_v1.0.0.apk** من قسم Assets أدناه
 
             ### المميزات
             - نظام اشتراكات (يومي $5 / أسبوعي $10 / شهري $20)
