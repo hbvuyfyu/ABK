@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/user_model.dart';
 import '../services/auth_service.dart';
-import '../services/api_service.dart';
 
 class AuthProvider extends ChangeNotifier {
   UserModel? _user;
@@ -15,22 +15,22 @@ class AuthProvider extends ChangeNotifier {
 
   AuthProvider() {
     _init();
+    Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+      if (data.event == AuthChangeEvent.signedOut) {
+        _user = null;
+        _isAuthenticated = false;
+        notifyListeners();
+      }
+    });
   }
 
   Future<void> _init() async {
-    final token = await ApiService.getToken();
-    if (token != null) {
+    final session = Supabase.instance.client.auth.currentSession;
+    if (session != null) {
       try {
-        final resp = await AuthService.getMe();
-        if (resp['success'] == true) {
-          _user = UserModel.fromJson(resp['data']);
-          _isAuthenticated = true;
-        } else {
-          await ApiService.deleteToken();
-        }
-      } catch (_) {
-        await ApiService.deleteToken();
-      }
+        _user = await AuthService.getMe();
+        _isAuthenticated = _user != null;
+      } catch (_) {}
     }
     _isLoading = false;
     notifyListeners();
@@ -38,33 +38,35 @@ class AuthProvider extends ChangeNotifier {
 
   Future<String?> login(String email, String password) async {
     try {
-      final resp = await AuthService.login(email, password);
-      if (resp['success'] == true) {
-        await ApiService.saveToken(resp['data']['token']);
-        _user = UserModel.fromJson(resp['data']['user']);
+      final user = await AuthService.login(email, password);
+      if (user != null) {
+        _user = user;
         _isAuthenticated = true;
         notifyListeners();
         return null;
       }
-      return resp['message'] ?? 'Login failed';
+      return 'فشل تسجيل الدخول';
+    } on AuthException catch (e) {
+      return e.message;
     } catch (_) {
-      return 'Connection error';
+      return 'خطأ في الاتصال';
     }
   }
 
   Future<String?> register(String email, String password, String? name) async {
     try {
-      final resp = await AuthService.register(email, password, name);
-      if (resp['success'] == true) {
-        await ApiService.saveToken(resp['data']['token']);
-        _user = UserModel.fromJson(resp['data']['user']);
+      final user = await AuthService.register(email, password, name);
+      if (user != null) {
+        _user = user;
         _isAuthenticated = true;
         notifyListeners();
         return null;
       }
-      return resp['message'] ?? 'Registration failed';
+      return 'فشل إنشاء الحساب';
+    } on AuthException catch (e) {
+      return e.message;
     } catch (_) {
-      return 'Connection error';
+      return 'خطأ في الاتصال';
     }
   }
 

@@ -2,22 +2,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
-import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'theme/app_theme.dart';
-import 'services/auth_service.dart';
-import 'services/api_service.dart';
 import 'router/app_router.dart';
 import 'providers/auth_provider.dart';
 import 'providers/subscription_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await Supabase.initialize(
+    url: 'https://wvjlkcfrgwkrsueceque.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind2amxrY2ZyZ3drcnN1ZWNlcXVlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3NDExNDAsImV4cCI6MjA5NzMxNzE0MH0.cVaaKWdKEUCfUkUX-D202suSkD9-d_0hDIlNrtNbFLU',
+  );
+
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
   ));
+
   runApp(const GameEventApp());
 }
 
