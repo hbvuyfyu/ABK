@@ -20,18 +20,20 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     try {
       final db = Supabase.instance.client;
       final now = DateTime.now().toIso8601String();
-      final results = await Future.wait([
-        db.from('profiles').select('id', const FetchOptions(count: CountOption.exact, head: true)),
-        db.from('subscriptions').select('id', const FetchOptions(count: CountOption.exact, head: true)).eq('status', 'ACTIVE').gte('end_date', now),
-        db.from('payments').select('id', const FetchOptions(count: CountOption.exact, head: true)).eq('status', 'PENDING'),
-        db.from('payments').select('amount').eq('status', 'APPROVED'),
-      ]);
-      final revenue = (results[3] as List).fold<double>(0, (s, p) => s + (double.tryParse('${p['amount']}') ?? 0));
+      final usersRes = await db.from('profiles').select('id').count(CountOption.exact);
+      final activeSubsRes = await db.from('subscriptions').select('id')
+          .eq('status', 'ACTIVE').gte('end_date', now).count(CountOption.exact);
+      final pendingRes = await db.from('payments').select('id')
+          .eq('status', 'PENDING').count(CountOption.exact);
+      final approvedPayments = await db.from('payments').select('amount')
+          .eq('status', 'APPROVED');
+      final revenue = (approvedPayments as List)
+          .fold<double>(0, (s, p) => s + (double.tryParse('\${p['amount']}') ?? 0));
       setState(() {
         _stats = {
-          'totalUsers': results[0].count ?? 0,
-          'activeSubscriptions': results[1].count ?? 0,
-          'pendingPayments': results[2].count ?? 0,
+          'totalUsers': usersRes.count ?? 0,
+          'activeSubscriptions': activeSubsRes.count ?? 0,
+          'pendingPayments': pendingRes.count ?? 0,
           'totalRevenue': revenue,
         };
       });

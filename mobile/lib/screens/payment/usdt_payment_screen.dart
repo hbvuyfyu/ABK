@@ -27,7 +27,7 @@ class _UsdtPaymentScreenState extends State<UsdtPaymentScreen> {
   Future<void> _loadData() async {
     try {
       final db = Supabase.instance.client;
-      final results = await Future.wait([
+      final results = await Future.wait<dynamic>([
         db.from('payments').select('*, plans(name,price)').eq('id', widget.paymentId).maybeSingle(),
         db.from('settings').select(),
       ]);
