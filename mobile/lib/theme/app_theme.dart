@@ -54,7 +54,7 @@ class AppTheme {
         titleTextStyle: GoogleFonts.cairo(color: textPrimary, fontSize: 18, fontWeight: FontWeight.w600),
         iconTheme: const IconThemeData(color: textPrimary),
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: cardBg,
         elevation: 0,
         shape: RoundedRectangleBorder(
