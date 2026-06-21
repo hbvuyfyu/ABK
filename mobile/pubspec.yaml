@@ -1,5 +1,5 @@
 name: game_event
-description: GAME EVENT - تطبيق إدارة الاشتراكات
+description: GAME EVENT - App
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -40,12 +40,6 @@ dependencies:
   # Misc
   intl: ^0.19.0
   url_launcher: ^6.2.2
-
-dependency_overrides:
-  package_info_plus: 8.0.2
-  # passkeys_doctor 1.4.1 breaks build (flutter.compileSdkVersion not available
-  # in library context). 2.0.0+ uses compileSdkVersion 34 directly.
-  passkeys_doctor: 2.0.0
 
 dev_dependencies:
   flutter_test:
