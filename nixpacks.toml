@@ -4,7 +4,7 @@
   [phases.build]
   dependsOn = ["setup"]
   cmds = [
-    "cd backend && npm install",
+    "cd backend && npm install --include=dev",
     "cd backend && npx prisma generate",
     "cd backend && npm run build"
   ]
