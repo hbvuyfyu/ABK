@@ -28,7 +28,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       final approvedPayments = await db.from('payments').select('amount')
           .eq('status', 'APPROVED');
       final revenue = (approvedPayments as List)
-          .fold<double>(0, (s, p) => s + (double.tryParse('\${p['amount']}') ?? 0));
+          .fold<double>(0, (s, p) => s + (double.tryParse(p['amount']?.toString() ?? '0') ?? 0));
       setState(() {
         _stats = {
           'totalUsers': usersRes.count ?? 0,
