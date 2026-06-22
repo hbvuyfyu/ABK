@@ -45,8 +45,10 @@ jobs:
         run: flutter analyze --no-fatal-infos || true
 
       - name: Build release APK
-        working-directory: mobile
-        run: flutter build apk --release --no-tree-shake-icons
+          working-directory: mobile
+          env:
+            GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
+          run: flutter build apk --release --no-tree-shake-icons
 
       - name: Rename APK
         run: |
