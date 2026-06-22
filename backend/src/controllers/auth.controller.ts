@@ -70,8 +70,9 @@ import { Request, Response } from 'express';
         select: { id: true, email: true, name: true, role: true, createdAt: true },
       });
       res.json({ success: true, data: user });
-    } catch {
-      res.status(500).json({ success: false, message: 'Server error' });
+    } catch (error) {
+      console.error('Register error:', error);
+      res.status(500).json({ success: false, message: 'Server error', error: String(error) });
     }
   };
   
