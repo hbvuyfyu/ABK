@@ -13,8 +13,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Supabase.initialize(
-    url: 'https://vegrcuiuyhsxmhjfyutd.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZlZ3JjdWl1eWhzeG1oamZ5dXRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMjMxOTksImV4cCI6MjA5NzY5OTE5OX0.j5Q2sc631JDHERO2bIF9UGQEXp6kbTE4M188XFgzhWo',
+    url: 'https://gddkftkgxdveeovdphwh.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdkZGtmdGtneGR2ZWVvdmRwaHdoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMzcyNzgsImV4cCI6MjA5NzcxMzI3OH0.zfKkvzddMzxDYkkdCo3Dt5gyh9w_PudUm25zXKdayYQ',
   );
 
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
