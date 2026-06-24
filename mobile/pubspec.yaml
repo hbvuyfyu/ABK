@@ -15,9 +15,6 @@ dependencies:
   # State management
   provider: ^6.1.1
 
-  # Supabase
-  supabase_flutter: ^2.5.3
-
   # HTTP
   http: ^1.2.0
 

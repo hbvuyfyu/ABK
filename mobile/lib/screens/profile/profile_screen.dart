@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/subscription_provider.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -24,15 +24,14 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
   void dispose() { _tabController.dispose(); super.dispose(); }
 
   Future<void> _loadData() async {
+    setState(() => _loading = true);
     try {
-      final uid = Supabase.instance.client.auth.currentUser?.id;
-      if (uid == null) return;
       final results = await Future.wait([
-        Supabase.instance.client.from('payments').select('*, plans(name)').eq('user_id', uid).order('created_at', ascending: false),
-        Supabase.instance.client.from('subscriptions').select('*, plans(name)').eq('user_id', uid).order('created_at', ascending: false),
+        ApiService.get('/users/payment-history'),
+        ApiService.get('/users/subscription-history'),
       ]);
-      _payments = results[0] as List;
-      _subscriptions = results[1] as List;
+      if (results[0]['success'] == true) _payments = (results[0]['data'] as List?) ?? [];
+      if (results[1]['success'] == true) _subscriptions = (results[1]['data'] as List?) ?? [];
     } catch (_) {}
     setState(() => _loading = false);
   }
@@ -45,12 +44,25 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
       appBar: AppBar(
         title: const Text('حسابي'),
         leading: IconButton(icon: const Icon(Icons.arrow_back_ios), onPressed: () => context.go('/')),
-        actions: [TextButton(onPressed: () async { await auth.logout(); if (mounted) context.go('/login'); }, child: const Text('تسجيل الخروج', style: TextStyle(color: AppTheme.error, fontFamily: 'Cairo')))],
+        actions: [
+          TextButton(
+            onPressed: () async { await auth.logout(); if (mounted) context.go('/login'); },
+            child: const Text('تسجيل الخروج', style: TextStyle(color: AppTheme.error, fontFamily: 'Cairo')),
+          ),
+        ],
       ),
-      body: _loading ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
           : Column(children: [
               _buildHeader(auth, sub),
-              TabBar(controller: _tabController, labelColor: AppTheme.primary, unselectedLabelColor: AppTheme.textSecondary, indicatorColor: AppTheme.primary, labelStyle: const TextStyle(fontFamily: 'Cairo'), tabs: const [Tab(text: 'المدفوعات'), Tab(text: 'الاشتراكات')]),
+              TabBar(
+                controller: _tabController,
+                labelColor: AppTheme.primary,
+                unselectedLabelColor: AppTheme.textSecondary,
+                indicatorColor: AppTheme.primary,
+                labelStyle: const TextStyle(fontFamily: 'Cairo'),
+                tabs: const [Tab(text: 'المدفوعات'), Tab(text: 'الاشتراكات')],
+              ),
               Expanded(child: TabBarView(controller: _tabController, children: [_buildPayments(), _buildSubscriptions()])),
             ]),
     );
@@ -63,7 +75,8 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(auth.user?.name ?? 'مستخدم', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
         Text(auth.user?.email ?? '', style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 13)),
-        if (sub.hasActive) Container(margin: const EdgeInsets.only(top: 6), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: AppTheme.success.withOpacity(0.15), borderRadius: BorderRadius.circular(8)), child: Text('مشترك نشط', style: const TextStyle(color: AppTheme.success, fontFamily: 'Cairo', fontSize: 12))),
+        if (sub.hasActive)
+          Container(margin: const EdgeInsets.only(top: 6), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: AppTheme.success.withOpacity(0.15), borderRadius: BorderRadius.circular(8)), child: const Text('مشترك نشط', style: TextStyle(color: AppTheme.success, fontFamily: 'Cairo', fontSize: 12))),
       ])),
     ]));
   }
@@ -71,12 +84,12 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
   Widget _buildPayments() {
     if (_payments.isEmpty) return const Center(child: Text('لا توجد مدفوعات', style: TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo')));
     return ListView.builder(padding: const EdgeInsets.all(16), itemCount: _payments.length, itemBuilder: (_, i) {
-      final p = _payments[i];
+      final p = _payments[i] as Map<String, dynamic>;
       final status = p['status'] as String;
       final color = status == 'APPROVED' ? AppTheme.success : status == 'REJECTED' ? AppTheme.error : AppTheme.warning;
       final label = status == 'APPROVED' ? 'مقبول' : status == 'REJECTED' ? 'مرفوض' : 'معلق';
       return Card(margin: const EdgeInsets.only(bottom: 10), child: ListTile(
-        title: Text(p['plans']?['name'] ?? '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textPrimary)),
+        title: Text((p['plan'] as Map?)?['name'] ?? '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textPrimary)),
         subtitle: Text('\$${p['amount']} • ${p['method']}', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textSecondary, fontSize: 12)),
         trailing: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(8)), child: Text(label, style: TextStyle(color: color, fontFamily: 'Cairo', fontSize: 11))),
       ));
@@ -86,11 +99,12 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
   Widget _buildSubscriptions() {
     if (_subscriptions.isEmpty) return const Center(child: Text('لا توجد اشتراكات', style: TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo')));
     return ListView.builder(padding: const EdgeInsets.all(16), itemCount: _subscriptions.length, itemBuilder: (_, i) {
-      final s = _subscriptions[i];
+      final s = _subscriptions[i] as Map<String, dynamic>;
       final isActive = s['status'] == 'ACTIVE';
+      final endDate = s['endDate'] as String?;
       return Card(margin: const EdgeInsets.only(bottom: 10), child: ListTile(
-        title: Text(s['plans']?['name'] ?? '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textPrimary)),
-        subtitle: Text(s['end_date'] != null ? 'حتى: ${s['end_date'].toString().substring(0, 10)}' : '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textSecondary, fontSize: 12)),
+        title: Text((s['plan'] as Map?)?['name'] ?? '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textPrimary)),
+        subtitle: Text(endDate != null ? 'حتى: ${endDate.substring(0, 10)}' : '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textSecondary, fontSize: 12)),
         trailing: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: isActive ? AppTheme.success.withOpacity(0.15) : AppTheme.border, borderRadius: BorderRadius.circular(8)), child: Text(isActive ? 'نشط' : 'منتهي', style: TextStyle(color: isActive ? AppTheme.success : AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 11))),
       ));
     });

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'theme/app_theme.dart';
 import 'router/app_router.dart';
@@ -11,11 +10,6 @@ import 'providers/subscription_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  await Supabase.initialize(
-    url: 'https://gddkftkgxdveeovdphwh.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdkZGtmdGtneGR2ZWVvdmRwaHdoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMzcyNzgsImV4cCI6MjA5NzcxMzI3OH0.zfKkvzddMzxDYkkdCo3Dt5gyh9w_PudUm25zXKdayYQ',
-  );
 
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(

@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/api_service.dart';
 
 class SubscriptionProvider extends ChangeNotifier {
   Map<String, dynamic>? _activeSubscription;
@@ -17,21 +17,13 @@ class SubscriptionProvider extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
-      final uid = Supabase.instance.client.auth.currentUser?.id;
-      if (uid == null) return;
-      final now = DateTime.now().toIso8601String();
-      final data = await Supabase.instance.client
-          .from('subscriptions')
-          .select('*, plans(*)')
-          .eq('user_id', uid)
-          .eq('status', 'ACTIVE')
-          .gte('end_date', now)
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
-      _activeSubscription = data;
-      _dailyUsed = data?['daily_operations_used'] ?? 0;
-      _dailyLimit = data?['plans']?['daily_operations'] ?? 0;
+      final res = await ApiService.get('/users/profile');
+      if (res['success'] == true && res['data'] != null) {
+        final data = res['data'] as Map<String, dynamic>;
+        _activeSubscription = data['subscription'] as Map<String, dynamic>?;
+        _dailyUsed = (data['dailyOperationsUsed'] as int?) ?? 0;
+        _dailyLimit = (data['dailyOperationsLimit'] as int?) ?? 0;
+      }
     } catch (_) {}
     _isLoading = false;
     notifyListeners();

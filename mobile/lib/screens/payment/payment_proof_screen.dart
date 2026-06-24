@@ -1,8 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/gradient_button.dart';
 
@@ -25,14 +26,20 @@ class _PaymentProofScreenState extends State<PaymentProofScreen> {
 
   Future<void> _loadData() async {
     try {
-      final db = Supabase.instance.client;
-      final results = await Future.wait<dynamic>([
-        db.from('payments').select('*, plans(name,price)').eq('id', widget.paymentId).maybeSingle(),
-        db.from('settings').select(),
+      final results = await Future.wait([
+        ApiService.get('/users/payment-history'),
+        ApiService.get('/settings/payment', auth: false),
       ]);
-      _payment = results[0] as Map<String, dynamic>?;
-      final settingsList = results[1] as List;
-      _settings = {for (final s in settingsList) s['key']: s['value']};
+      if (results[0]['success'] == true) {
+        final payments = (results[0]['data'] as List?) ?? [];
+        _payment = payments.firstWhere(
+          (p) => (p as Map)['id'] == widget.paymentId,
+          orElse: () => null,
+        ) as Map<String, dynamic>?;
+      }
+      if (results[1]['success'] == true) {
+        _settings = results[1]['data'] as Map<String, dynamic>?;
+      }
     } catch (_) {}
     setState(() => _loading = false);
   }
@@ -49,12 +56,16 @@ class _PaymentProofScreenState extends State<PaymentProofScreen> {
     }
     setState(() => _submitting = true);
     try {
-      final bytes = await _pickedImage!.readAsBytes();
-      final b64 = base64Encode(bytes);
-      await Supabase.instance.client.from('payments').update({'proof_image': b64}).eq('id', widget.paymentId);
+      final bytes = await File(_pickedImage!.path).readAsBytes();
+      final b64 = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      final res = await ApiService.post('/payments/${widget.paymentId}/proof', {'imageBase64': b64});
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال الإثبات، انتظر موافقة الأدمن', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.success));
-      context.go('/');
+      if (res['success'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال الإثبات، انتظر موافقة الأدمن', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.success));
+        context.go('/');
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res['message']?.toString() ?? 'فشل الإرسال', style: const TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.error));
+      }
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('فشل الإرسال', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.error));
@@ -66,16 +77,16 @@ class _PaymentProofScreenState extends State<PaymentProofScreen> {
   Widget build(BuildContext context) {
     final method = _payment?['method'] as String? ?? '';
     final address = method == 'SHAM_CASH' ? (_settings?['sham_cash_number'] ?? '') : (_settings?['syriatel_cash_number'] ?? '');
-
     return Scaffold(
       appBar: AppBar(title: const Text('إرسال إثبات الدفع'), leading: IconButton(icon: const Icon(Icons.arrow_back_ios), onPressed: () => context.pop())),
-      body: _loading ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
           : SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.border)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(_payment?['plans']?['name'] ?? '', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
+                Text((_payment?['plan'] as Map?)?['name'] ?? '', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
                 const SizedBox(height: 8),
                 Text('المبلغ: \$${_payment?['amount'] ?? ''}', style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo')),
-                if (address.isNotEmpty) ...[
+                if (address.toString().isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text('الرقم: $address', style: const TextStyle(color: AppTheme.accent, fontFamily: 'Cairo', fontWeight: FontWeight.bold)),
                 ],
@@ -88,9 +99,9 @@ class _PaymentProofScreenState extends State<PaymentProofScreen> {
                 borderRadius: BorderRadius.circular(16),
                 child: Container(
                   height: 180, width: double.infinity,
-                  decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.border, style: BorderStyle.solid)),
+                  decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.border)),
                   child: _pickedImage != null
-                      ? ClipRRect(borderRadius: BorderRadius.circular(15), child: Image.network(_pickedImage!.path, fit: BoxFit.cover, errorBuilder: (_, __, ___) => const Icon(Icons.image, color: AppTheme.primary, size: 48)))
+                      ? ClipRRect(borderRadius: BorderRadius.circular(15), child: Image.file(File(_pickedImage!.path), fit: BoxFit.cover))
                       : const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                           Icon(Icons.add_photo_alternate_outlined, color: AppTheme.primary, size: 48),
                           SizedBox(height: 8),

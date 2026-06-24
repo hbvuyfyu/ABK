@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/gradient_button.dart';
 
@@ -22,35 +22,53 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   Future<void> _loadData() async {
     try {
-      final data = await Supabase.instance.client.from('plans').select().eq('id', widget.planId).maybeSingle();
-      setState(() => _plan = data);
+      final res = await ApiService.get('/plans', auth: false);
+      if (res['success'] == true) {
+        final plans = (res['data'] as List?) ?? [];
+        final plan = plans.firstWhere(
+          (p) => (p as Map)['id'] == widget.planId,
+          orElse: () => null,
+        );
+        setState(() => _plan = plan as Map<String, dynamic>?);
+      }
     } catch (_) {}
     setState(() => _loading = false);
   }
 
   Future<void> _proceed() async {
     if (_selectedMethod == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اختر طريقة الدفع أولاً', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.warning));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('اختر طريقة الدفع أولاً', style: TextStyle(fontFamily: 'Cairo')),
+        backgroundColor: AppTheme.warning,
+      ));
       return;
     }
     setState(() => _processing = true);
     try {
-      final uid = Supabase.instance.client.auth.currentUser?.id;
-      if (uid == null) throw Exception('not authenticated');
-      final res = await Supabase.instance.client.from('payments').insert({
-        'user_id': uid, 'plan_id': widget.planId,
-        'amount': _plan!['price'], 'method': _selectedMethod, 'status': 'PENDING',
-      }).select().single();
+      final res = await ApiService.post('/payments', {
+        'planId': widget.planId,
+        'method': _selectedMethod,
+      });
       if (!mounted) return;
-      final paymentId = res['id'] as String;
-      if (_selectedMethod == 'USDT_BEP20') {
-        context.push('/payment/$paymentId/usdt');
+      if (res['success'] == true) {
+        final paymentId = (res['data'] as Map<String, dynamic>)['id'] as String;
+        if (_selectedMethod == 'USDT_BEP20') {
+          context.push('/payment/$paymentId/usdt');
+        } else {
+          context.push('/payment/$paymentId/proof');
+        }
       } else {
-        context.push('/payment/$paymentId/proof');
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(res['message']?.toString() ?? 'خطأ في إنشاء طلب الدفع', style: const TextStyle(fontFamily: 'Cairo')),
+          backgroundColor: AppTheme.error,
+        ));
       }
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('خطأ في إنشاء طلب الدفع', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.error));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('خطأ في الاتصال بالسيرفر', style: TextStyle(fontFamily: 'Cairo')),
+        backgroundColor: AppTheme.error,
+      ));
     }
     setState(() => _processing = false);
   }
@@ -58,8 +76,12 @@ class _PaymentScreenState extends State<PaymentScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('إتمام الدفع'), leading: IconButton(icon: const Icon(Icons.arrow_back_ios), onPressed: () => context.pop())),
-      body: _loading ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
+      appBar: AppBar(
+        title: const Text('إتمام الدفع'),
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios), onPressed: () => context.pop()),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
           : SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               _buildSummary(), const SizedBox(height: 24), _buildMethods(), const SizedBox(height: 24),
               GradientButton(onPressed: _processing ? null : _proceed, isLoading: _processing, text: 'متابعة'),
@@ -69,14 +91,21 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   Widget _buildSummary() {
     if (_plan == null) return const SizedBox();
-    return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(gradient: LinearGradient(colors: [AppTheme.primary.withOpacity(0.2), AppTheme.primaryDark.withOpacity(0.1)]), borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.primary.withOpacity(0.3))),
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: [AppTheme.primary.withOpacity(0.2), AppTheme.primaryDark.withOpacity(0.1)]),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
+      ),
       child: Row(children: [
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(_plan!['name'] ?? '', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
-          Text('${_plan!['duration_days']} يوم | ${_plan!['daily_operations']} عملية/يوم', style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo')),
+          Text('${_plan!['durationDays']} يوم | ${_plan!['dailyOperations']} عملية/يوم', style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo')),
         ])),
         Text('\$${_plan!['price']}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: AppTheme.accent, fontFamily: 'Cairo')),
-      ]));
+      ]),
+    );
   }
 
   Widget _buildMethods() {
@@ -88,19 +117,27 @@ class _PaymentScreenState extends State<PaymentScreen> {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('طريقة الدفع', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
       const SizedBox(height: 12),
-      ...methods.map((m) => Padding(padding: const EdgeInsets.only(bottom: 12), child: InkWell(
-        onTap: () => setState(() => _selectedMethod = m['value'] as String),
-        borderRadius: BorderRadius.circular(16),
-        child: Container(padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: _selectedMethod == m['value'] ? (m['color'] as Color).withOpacity(0.15) : AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: _selectedMethod == m['value'] ? m['color'] as Color : AppTheme.border, width: _selectedMethod == m['value'] ? 2 : 1)),
-          child: Row(children: [
-            Icon(m['icon'] as IconData, color: m['color'] as Color, size: 28), const SizedBox(width: 16),
-            Text(m['label'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: _selectedMethod == m['value'] ? AppTheme.textPrimary : AppTheme.textSecondary, fontFamily: 'Cairo')),
-            const Spacer(),
-            if (_selectedMethod == m['value']) Icon(Icons.check_circle, color: m['color'] as Color, size: 24),
-          ]),
+      ...methods.map((m) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: InkWell(
+          onTap: () => setState(() => _selectedMethod = m['value'] as String),
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: _selectedMethod == m['value'] ? (m['color'] as Color).withOpacity(0.15) : AppTheme.cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _selectedMethod == m['value'] ? m['color'] as Color : AppTheme.border, width: _selectedMethod == m['value'] ? 2 : 1),
+            ),
+            child: Row(children: [
+              Icon(m['icon'] as IconData, color: m['color'] as Color, size: 28), const SizedBox(width: 16),
+              Text(m['label'] as String, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: _selectedMethod == m['value'] ? AppTheme.textPrimary : AppTheme.textSecondary, fontFamily: 'Cairo')),
+              const Spacer(),
+              if (_selectedMethod == m['value']) Icon(Icons.check_circle, color: m['color'] as Color, size: 24),
+            ]),
+          ),
         ),
-      ))),
+      )),
     ]);
   }
 }

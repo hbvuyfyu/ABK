@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/user_model.dart';
 import '../services/auth_service.dart';
+import '../services/api_service.dart';
 
 class AuthProvider extends ChangeNotifier {
   UserModel? _user;
@@ -15,22 +15,18 @@ class AuthProvider extends ChangeNotifier {
 
   AuthProvider() {
     _init();
-    Supabase.instance.client.auth.onAuthStateChange.listen((data) {
-      if (data.event == AuthChangeEvent.signedOut) {
-        _user = null;
-        _isAuthenticated = false;
-        notifyListeners();
-      }
-    });
   }
 
   Future<void> _init() async {
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session != null) {
+    final token = await ApiService.getToken();
+    if (token != null) {
       try {
         _user = await AuthService.getMe();
         _isAuthenticated = _user != null;
-      } catch (_) {}
+        if (_user == null) await ApiService.deleteToken();
+      } catch (_) {
+        await ApiService.deleteToken();
+      }
     }
     _isLoading = false;
     notifyListeners();
@@ -38,35 +34,31 @@ class AuthProvider extends ChangeNotifier {
 
   Future<String?> login(String email, String password) async {
     try {
-      final user = await AuthService.login(email, password);
-      if (user != null) {
-        _user = user;
+      final data = await AuthService.login(email, password);
+      if (data != null && data['user'] != null) {
+        _user = UserModel.fromJson(data['user'] as Map<String, dynamic>);
         _isAuthenticated = true;
         notifyListeners();
         return null;
       }
-      return 'فشل تسجيل الدخول';
-    } on AuthException catch (e) {
-      return e.message;
+      return 'فشل تسجيل الدخول، تحقق من البريد وكلمة المرور';
     } catch (_) {
-      return 'خطأ في الاتصال';
+      return 'خطأ في الاتصال بالسيرفر';
     }
   }
 
   Future<String?> register(String email, String password, String? name) async {
     try {
-      final user = await AuthService.register(email, password, name);
-      if (user != null) {
-        _user = user;
+      final data = await AuthService.register(email, password, name);
+      if (data != null && data['user'] != null) {
+        _user = UserModel.fromJson(data['user'] as Map<String, dynamic>);
         _isAuthenticated = true;
         notifyListeners();
         return null;
       }
       return 'فشل إنشاء الحساب';
-    } on AuthException catch (e) {
-      return e.message;
     } catch (_) {
-      return 'خطأ في الاتصال';
+      return 'خطأ في الاتصال بالسيرفر';
     }
   }
 
@@ -78,6 +70,8 @@ class AuthProvider extends ChangeNotifier {
   }
 
   Future<void> refresh() async {
+    _isLoading = true;
+    notifyListeners();
     await _init();
   }
 }

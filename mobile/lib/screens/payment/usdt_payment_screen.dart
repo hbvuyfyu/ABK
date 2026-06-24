@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/gradient_button.dart';
 
@@ -26,14 +26,20 @@ class _UsdtPaymentScreenState extends State<UsdtPaymentScreen> {
 
   Future<void> _loadData() async {
     try {
-      final db = Supabase.instance.client;
-      final results = await Future.wait<dynamic>([
-        db.from('payments').select('*, plans(name,price)').eq('id', widget.paymentId).maybeSingle(),
-        db.from('settings').select(),
+      final results = await Future.wait([
+        ApiService.get('/users/payment-history'),
+        ApiService.get('/settings/payment', auth: false),
       ]);
-      _payment = results[0] as Map<String, dynamic>?;
-      final settingsList = results[1] as List;
-      _settings = {for (final s in settingsList) s['key']: s['value']};
+      if (results[0]['success'] == true) {
+        final payments = (results[0]['data'] as List?) ?? [];
+        _payment = payments.firstWhere(
+          (p) => (p as Map)['id'] == widget.paymentId,
+          orElse: () => null,
+        ) as Map<String, dynamic>?;
+      }
+      if (results[1]['success'] == true) {
+        _settings = results[1]['data'] as Map<String, dynamic>?;
+      }
     } catch (_) {}
     setState(() => _loading = false);
   }
@@ -45,10 +51,14 @@ class _UsdtPaymentScreenState extends State<UsdtPaymentScreen> {
     }
     setState(() => _submitting = true);
     try {
-      await Supabase.instance.client.from('payments').update({'txid': _txidCtrl.text.trim()}).eq('id', widget.paymentId);
+      final res = await ApiService.post('/payments/${widget.paymentId}/verify-txid', {'txid': _txidCtrl.text.trim()});
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال TXID، انتظر موافقة الأدمن', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.success));
-      context.go('/');
+      if (res['success'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم التحقق وتفعيل الاشتراك', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.success));
+        context.go('/');
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res['message']?.toString() ?? 'فشل التحقق', style: const TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.error));
+      }
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('فشل الإرسال', style: TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.error));
@@ -61,14 +71,18 @@ class _UsdtPaymentScreenState extends State<UsdtPaymentScreen> {
     final address = _settings?['usdt_address'] ?? '';
     return Scaffold(
       appBar: AppBar(title: const Text('دفع USDT BEP20'), leading: IconButton(icon: const Icon(Icons.arrow_back_ios), onPressed: () => context.pop())),
-      body: _loading ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
           : SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.border)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Text('عنوان المحفظة (BEP20)', style: TextStyle(fontSize: 14, color: AppTheme.textSecondary, fontFamily: 'Cairo')),
                 const SizedBox(height: 8),
                 Row(children: [
-                  Expanded(child: Text(address, style: const TextStyle(fontSize: 13, color: AppTheme.textPrimary, fontFamily: 'Courier'), overflow: TextOverflow.ellipsis)),
-                  IconButton(icon: const Icon(Icons.copy, color: AppTheme.primary, size: 20), onPressed: () { Clipboard.setData(ClipboardData(text: address)); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم النسخ', style: TextStyle(fontFamily: 'Cairo')), duration: Duration(seconds: 1))); }),
+                  Expanded(child: Text(address.toString(), style: const TextStyle(fontSize: 13, color: AppTheme.textPrimary, fontFamily: 'Courier'), overflow: TextOverflow.ellipsis)),
+                  IconButton(icon: const Icon(Icons.copy, color: AppTheme.primary, size: 20), onPressed: () {
+                    Clipboard.setData(ClipboardData(text: address.toString()));
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم النسخ', style: TextStyle(fontFamily: 'Cairo')), duration: Duration(seconds: 1)));
+                  }),
                 ]),
                 const Divider(color: AppTheme.border),
                 Text('المبلغ: \$${_payment?['amount'] ?? ''}', style: const TextStyle(color: AppTheme.accent, fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 18)),

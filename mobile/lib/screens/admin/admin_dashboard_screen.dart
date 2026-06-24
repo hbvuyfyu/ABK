@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
@@ -12,32 +12,23 @@ class AdminDashboardScreen extends StatefulWidget {
 class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   Map<String, dynamic>? _stats;
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() { super.initState(); _loadStats(); }
 
   Future<void> _loadStats() async {
+    setState(() { _loading = true; _error = null; });
     try {
-      final db = Supabase.instance.client;
-      final now = DateTime.now().toIso8601String();
-      final usersRes = await db.from('profiles').select('id').count(CountOption.exact);
-      final activeSubsRes = await db.from('subscriptions').select('id')
-          .eq('status', 'ACTIVE').gte('end_date', now).count(CountOption.exact);
-      final pendingRes = await db.from('payments').select('id')
-          .eq('status', 'PENDING').count(CountOption.exact);
-      final approvedPayments = await db.from('payments').select('amount')
-          .eq('status', 'APPROVED');
-      final revenue = (approvedPayments as List)
-          .fold<double>(0, (s, p) => s + (double.tryParse(p['amount']?.toString() ?? '0') ?? 0));
-      setState(() {
-        _stats = {
-          'totalUsers': usersRes.count ?? 0,
-          'activeSubscriptions': activeSubsRes.count ?? 0,
-          'pendingPayments': pendingRes.count ?? 0,
-          'totalRevenue': revenue,
-        };
-      });
-    } catch (_) {}
+      final res = await ApiService.get('/admin/dashboard');
+      if (res['success'] == true) {
+        setState(() => _stats = res['data'] as Map<String, dynamic>);
+      } else {
+        setState(() => _error = res['message']?.toString() ?? 'فشل تحميل البيانات');
+      }
+    } catch (e) {
+      setState(() => _error = 'خطأ في الاتصال بالسيرفر');
+    }
     setState(() => _loading = false);
   }
 
@@ -53,16 +44,24 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
-          : RefreshIndicator(
-              onRefresh: _loadStats,
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(20),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  _buildStatsGrid(), const SizedBox(height: 24), _buildAdminMenu(context),
-                ]),
-              ),
-            ),
+          : _error != null
+              ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const Icon(Icons.error_outline, color: AppTheme.error, size: 48),
+                  const SizedBox(height: 12),
+                  Text(_error!, style: const TextStyle(color: AppTheme.error, fontFamily: 'Cairo')),
+                  const SizedBox(height: 16),
+                  ElevatedButton(onPressed: _loadStats, child: const Text('إعادة المحاولة', style: TextStyle(fontFamily: 'Cairo'))),
+                ]))
+              : RefreshIndicator(
+                  onRefresh: _loadStats,
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.all(20),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      _buildStatsGrid(), const SizedBox(height: 24), _buildAdminMenu(context),
+                    ]),
+                  ),
+                ),
     );
   }
 
@@ -71,7 +70,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       {'label': 'إجمالي المستخدمين', 'value': '${_stats?['totalUsers'] ?? 0}', 'icon': Icons.people_outline, 'color': AppTheme.primary},
       {'label': 'اشتراكات نشطة', 'value': '${_stats?['activeSubscriptions'] ?? 0}', 'icon': Icons.card_membership_outlined, 'color': AppTheme.success},
       {'label': 'طلبات معلقة', 'value': '${_stats?['pendingPayments'] ?? 0}', 'icon': Icons.pending_actions_outlined, 'color': AppTheme.warning},
-      {'label': 'إجمالي الأرباح', 'value': '\$${(_stats?['totalRevenue'] ?? 0.0).toStringAsFixed(2)}', 'icon': Icons.attach_money_outlined, 'color': AppTheme.accent},
+      {'label': 'إجمالي الأرباح', 'value': '\$${((_stats?['totalRevenue'] ?? 0.0) as num).toStringAsFixed(2)}', 'icon': Icons.attach_money_outlined, 'color': AppTheme.accent},
     ];
     return GridView.builder(
       shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),

@@ -1,7 +1,6 @@
 import { Response } from 'express';
 import prisma from '../utils/prisma';
 import { AuthRequest } from '../middleware/auth.middleware';
-import bcrypt from 'bcryptjs';
 
 export const getDashboard = async (_req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -31,11 +30,30 @@ export const getUsers = async (_req: AuthRequest, res: Response): Promise<void> 
       where: { role: 'USER' },
       select: {
         id: true, email: true, name: true, isActive: true, createdAt: true,
-        subscriptions: { where: { status: 'ACTIVE', endDate: { gt: new Date() } }, include: { plan: true }, take: 1 },
+        subscriptions: {
+          where: { status: 'ACTIVE', endDate: { gt: new Date() } },
+          include: { plan: true },
+          take: 1,
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
     res.json({ success: true, data: users });
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+export const getAllSubscriptions = async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const subscriptions = await prisma.subscription.findMany({
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+        plan: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ success: true, data: subscriptions });
   } catch {
     res.status(500).json({ success: false, message: 'Server error' });
   }
