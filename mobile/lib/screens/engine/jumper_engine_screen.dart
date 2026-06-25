@@ -1,0 +1,821 @@
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import '../../theme/app_theme.dart';
+
+// ────────────────────────────────────────────────────────────────────────────
+// MethodChannel bridge
+// ────────────────────────────────────────────────────────────────────────────
+class JumperBridge {
+  static const _ch = MethodChannel('com.gamevent.app/jumper');
+
+  static Future<List<Map<String, dynamic>>> getRunningApps() async {
+    final raw = await _ch.invokeListMethod<Map>('getRunningApps') ?? [];
+    return raw.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  static Future<Map<String, dynamic>> runJumper(String packageName) async {
+    final raw = await _ch.invokeMapMethod<String, dynamic>(
+      'runJumper',
+      {'packageName': packageName},
+    );
+    return Map<String, dynamic>.from(raw ?? {});
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Main Screen
+// ────────────────────────────────────────────────────────────────────────────
+class JumperEngineScreen extends StatefulWidget {
+  const JumperEngineScreen({super.key});
+  @override
+  State<JumperEngineScreen> createState() => _JumperEngineScreenState();
+}
+
+class _JumperEngineScreenState extends State<JumperEngineScreen>
+    with TickerProviderStateMixin {
+  // State
+  _Phase _phase = _Phase.idle;
+  List<Map<String, dynamic>> _apps = [];
+  Map<String, dynamic>? _selected;
+  List<String> _consoleLines = [];
+  bool? _success;
+  String _statusText = '';
+
+  // Animations
+  late final AnimationController _glowCtrl;
+  late final AnimationController _pulseCtrl;
+  late final Animation<double> _glow;
+  late final Animation<double> _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _glowCtrl = AnimationController(vsync: this, duration: const Duration(seconds: 2))
+      ..repeat(reverse: true);
+    _pulseCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 800))
+      ..repeat(reverse: true);
+    _glow = Tween<double>(begin: 0.3, end: 1.0).animate(
+      CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut),
+    );
+    _pulse = Tween<double>(begin: 0.8, end: 1.2).animate(
+      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _glowCtrl.dispose();
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  // ── Load running apps ──────────────────────────────────────────────────────
+  Future<void> _openAppPicker() async {
+    setState(() {
+      _phase = _Phase.loadingApps;
+      _statusText = 'جاري جلب التطبيقات المفتوحة...';
+    });
+
+    try {
+      final apps = await JumperBridge.getRunningApps();
+      if (!mounted) return;
+      if (apps.isEmpty) {
+        _showError('لم يتم العثور على تطبيقات مفتوحة');
+        setState(() => _phase = _Phase.idle);
+        return;
+      }
+      setState(() {
+        _apps = apps;
+        _phase = _Phase.idle;
+      });
+      _showAppPicker();
+    } catch (e) {
+      if (!mounted) return;
+      _showError('فشل جلب التطبيقات: $e');
+      setState(() => _phase = _Phase.idle);
+    }
+  }
+
+  // ── App picker bottom sheet ────────────────────────────────────────────────
+  void _showAppPicker() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _AppPickerSheet(
+        apps: _apps,
+        onSelected: (app) {
+          Navigator.pop(context);
+          _executeJumper(app);
+        },
+      ),
+    );
+  }
+
+  // ── Execute script ─────────────────────────────────────────────────────────
+  Future<void> _executeJumper(Map<String, dynamic> app) async {
+    setState(() {
+      _selected = app;
+      _phase = _Phase.running;
+      _consoleLines = [];
+      _success = null;
+      _statusText = 'تشغيل المحرك...';
+    });
+
+    // Animated console lines before actual execution
+    final preLines = [
+      '[*] 07-JUMPER initialising...',
+      '[*] Target: ${app['package']}',
+      '[*] Connecting to Frida server...',
+      '[*] Injecting into process...',
+      '[*] Waiting for script execution (4s delay)...',
+    ];
+    for (final line in preLines) {
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (!mounted) return;
+      setState(() => _consoleLines.add(line));
+    }
+
+    try {
+      final result = await JumperBridge.runJumper(app['package'] as String);
+      if (!mounted) return;
+
+      final success = result['success'] as bool? ?? false;
+      final rawOutput = result['output'] as String? ?? '';
+
+      // Append real output lines
+      for (final line in rawOutput.split('\n')) {
+        if (line.trim().isEmpty) continue;
+        await Future.delayed(const Duration(milliseconds: 120));
+        if (!mounted) return;
+        setState(() => _consoleLines.add(line));
+      }
+
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+      setState(() {
+        _success = success;
+        _phase = _Phase.done;
+        _statusText = success ? 'تمت العملية بنجاح ✓' : 'انتهت العملية';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _consoleLines.add('[-] Exception: $e');
+        _success = false;
+        _phase = _Phase.done;
+        _statusText = 'حدث خطأ';
+      });
+    }
+  }
+
+  void _reset() {
+    setState(() {
+      _phase = _Phase.idle;
+      _selected = null;
+      _consoleLines = [];
+      _success = null;
+      _statusText = '';
+    });
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: const TextStyle(fontFamily: 'Cairo')),
+      backgroundColor: AppTheme.error,
+    ));
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppTheme.background,
+      appBar: AppBar(
+        title: Row(mainAxisSize: MainAxisSize.min, children: [
+          AnimatedBuilder(
+            animation: _glow,
+            builder: (_, __) => Icon(
+              Icons.electric_bolt,
+              color: const Color(0xFF00FF88).withOpacity(_glow.value),
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 8),
+          const Text('محرك الجمبرة',
+              style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold)),
+        ]),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+      ),
+      body: switch (_phase) {
+        _Phase.idle => _buildIdle(),
+        _Phase.loadingApps => _buildLoadingApps(),
+        _Phase.running || _Phase.done => _buildConsole(),
+      },
+    );
+  }
+
+  // ── Idle view ──────────────────────────────────────────────────────────────
+  Widget _buildIdle() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          // Glowing icon
+          AnimatedBuilder(
+            animation: _glow,
+            builder: (_, __) => Container(
+              width: 140,
+              height: 140,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFF001A0A),
+                border: Border.all(
+                  color: const Color(0xFF00FF88).withOpacity(_glow.value),
+                  width: 2,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF00FF88).withOpacity(_glow.value * 0.4),
+                    blurRadius: 40,
+                    spreadRadius: 10,
+                  ),
+                ],
+              ),
+              child: Center(
+                child: Text(
+                  '⚡',
+                  style: TextStyle(
+                    fontSize: 64,
+                    shadows: [
+                      Shadow(
+                        color: const Color(0xFF00FF88).withOpacity(_glow.value),
+                        blurRadius: 20,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 32),
+          const Text(
+            'محرك الجمبرة',
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF00FF88),
+              fontFamily: 'Cairo',
+              letterSpacing: 2,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '07-JuMper Script Engine',
+            style: TextStyle(
+              fontSize: 13,
+              color: Color(0xFF00FF88),
+              fontFamily: 'Courier',
+              letterSpacing: 3,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF001A0A),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.2)),
+            ),
+            child: const Text(
+              'يتصل بـ AppsFlyer SDK\nويرسل event: power_5w',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Color(0xFF88FFBB),
+                fontFamily: 'Cairo',
+                fontSize: 13,
+                height: 1.6,
+              ),
+            ),
+          ),
+          const SizedBox(height: 40),
+          // Launch button
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _openAppPicker,
+              icon: const Icon(Icons.rocket_launch, size: 22),
+              label: const Text(
+                'اختر تطبيقاً وابدأ',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, fontFamily: 'Cairo'),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF00FF88),
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 0,
+                shadowColor: Colors.transparent,
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ── Loading apps ───────────────────────────────────────────────────────────
+  Widget _buildLoadingApps() {
+    return Center(
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        AnimatedBuilder(
+          animation: _pulse,
+          builder: (_, __) => Transform.scale(
+            scale: _pulse.value,
+            child: const Icon(Icons.apps, color: Color(0xFF00FF88), size: 64),
+          ),
+        ),
+        const SizedBox(height: 24),
+        const Text(
+          'جاري جلب التطبيقات المفتوحة...',
+          style: TextStyle(
+              color: Color(0xFF00FF88), fontFamily: 'Cairo', fontSize: 16),
+        ),
+        const SizedBox(height: 16),
+        const SizedBox(
+          width: 200,
+          child: LinearProgressIndicator(
+            color: Color(0xFF00FF88),
+            backgroundColor: Color(0xFF001A0A),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  // ── Console / Result ───────────────────────────────────────────────────────
+  Widget _buildConsole() {
+    final isRunning = _phase == _Phase.running;
+    final isSuccess = _success == true;
+
+    return Column(children: [
+      // Target app header
+      if (_selected != null)
+        Container(
+          margin: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF001A0A),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3)),
+          ),
+          child: Row(children: [
+            _AppIcon(iconBase64: _selected!['icon'] as String? ?? '', size: 44),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(
+                  _selected!['name'] as String? ?? '',
+                  style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      fontFamily: 'Cairo'),
+                ),
+                Text(
+                  _selected!['package'] as String? ?? '',
+                  style: const TextStyle(
+                      color: Color(0xFF00FF88),
+                      fontFamily: 'Courier',
+                      fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ]),
+            ),
+            if (isRunning)
+              AnimatedBuilder(
+                animation: _pulse,
+                builder: (_, __) => Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFF00FF88)
+                        .withOpacity(_pulse.value),
+                  ),
+                ),
+              )
+            else
+              Icon(
+                isSuccess ? Icons.check_circle : Icons.cancel,
+                color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error,
+                size: 28,
+              ),
+          ]),
+        ),
+
+      // Console output
+      Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF050D08),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.15)),
+          ),
+          child: Column(children: [
+            // Terminal header bar
+            Row(children: [
+              _dot(const Color(0xFFFF5F57)),
+              const SizedBox(width: 6),
+              _dot(const Color(0xFFFFBD2E)),
+              const SizedBox(width: 6),
+              _dot(const Color(0xFF28CA41)),
+              const SizedBox(width: 12),
+              const Text('frida console',
+                  style: TextStyle(
+                      color: Color(0xFF445544), fontFamily: 'Courier', fontSize: 12)),
+              const Spacer(),
+              if (isRunning)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Color(0xFF00FF88),
+                  ),
+                ),
+            ]),
+            const SizedBox(height: 12),
+            const Divider(color: Color(0xFF1A2E1A), height: 1),
+            const SizedBox(height: 8),
+            // Lines
+            Expanded(
+              child: ListView.builder(
+                itemCount: _consoleLines.length + (isRunning ? 1 : 0),
+                itemBuilder: (_, i) {
+                  if (i == _consoleLines.length) {
+                    // Blinking cursor
+                    return AnimatedBuilder(
+                      animation: _pulse,
+                      builder: (_, __) => Text(
+                        _pulse.value > 1.0 ? '█' : ' ',
+                        style: const TextStyle(
+                            color: Color(0xFF00FF88), fontFamily: 'Courier', fontSize: 13),
+                      ),
+                    );
+                  }
+                  final line = _consoleLines[i];
+                  final color = line.startsWith('[+]')
+                      ? const Color(0xFF00FF88)
+                      : line.startsWith('[-]')
+                          ? AppTheme.error
+                          : line.startsWith('[*]')
+                              ? const Color(0xFFFFBD2E)
+                              : const Color(0xFF88BB88);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      line,
+                      style: TextStyle(
+                        color: color,
+                        fontFamily: 'Courier',
+                        fontSize: 12,
+                        height: 1.5,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ]),
+        ),
+      ),
+
+      // Result banner + action button
+      if (_phase == _Phase.done) ...[
+        const SizedBox(height: 16),
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: isSuccess
+                ? const Color(0xFF00FF88).withOpacity(0.1)
+                : AppTheme.error.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isSuccess
+                  ? const Color(0xFF00FF88).withOpacity(0.4)
+                  : AppTheme.error.withOpacity(0.4),
+            ),
+          ),
+          child: Row(children: [
+            Icon(
+              isSuccess ? Icons.check_circle_outline : Icons.error_outline,
+              color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error,
+              size: 32,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(
+                  isSuccess ? 'تمت العملية بنجاح!' : 'انتهت العملية',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error,
+                    fontFamily: 'Cairo',
+                  ),
+                ),
+                Text(
+                  isSuccess
+                      ? 'تم إرسال event power_5w عبر AppsFlyer'
+                      : 'راجع الـ console للتفاصيل',
+                  style: const TextStyle(
+                      color: Color(0xFF88BB88), fontFamily: 'Cairo', fontSize: 12),
+                ),
+              ]),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _reset,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('تشغيل مجدداً', style: TextStyle(fontFamily: 'Cairo')),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF00FF88),
+                  side: const BorderSide(color: Color(0xFF00FF88)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () => _executeJumper(_selected!),
+                icon: const Icon(Icons.bolt, size: 18),
+                label: const Text('إعادة التنفيذ', style: TextStyle(fontFamily: 'Cairo')),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00FF88),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ],
+      const SizedBox(height: 16),
+    ]);
+  }
+
+  Widget _dot(Color color) => Container(
+        width: 12,
+        height: 12,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// App Picker Bottom Sheet
+// ────────────────────────────────────────────────────────────────────────────
+class _AppPickerSheet extends StatefulWidget {
+  final List<Map<String, dynamic>> apps;
+  final void Function(Map<String, dynamic>) onSelected;
+
+  const _AppPickerSheet({required this.apps, required this.onSelected});
+
+  @override
+  State<_AppPickerSheet> createState() => _AppPickerSheetState();
+}
+
+class _AppPickerSheetState extends State<_AppPickerSheet> {
+  String _search = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = widget.apps
+        .where((a) =>
+            (a['name'] as String)
+                .toLowerCase()
+                .contains(_search.toLowerCase()) ||
+            (a['package'] as String)
+                .toLowerCase()
+                .contains(_search.toLowerCase()))
+        .toList();
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.4,
+      maxChildSize: 0.95,
+      builder: (_, ctrl) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF0A1A0A),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(top: BorderSide(color: Color(0xFF00FF88), width: 1)),
+        ),
+        child: Column(children: [
+          // Handle
+          const SizedBox(height: 12),
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: const Color(0xFF00FF88).withOpacity(0.3),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Title
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            const Icon(Icons.apps, color: Color(0xFF00FF88), size: 20),
+            const SizedBox(width: 8),
+            Text(
+              'اختر التطبيق (${widget.apps.length} مفتوح)',
+              style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                  fontFamily: 'Cairo'),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          // Search
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: TextField(
+              style: const TextStyle(color: Colors.white, fontFamily: 'Cairo'),
+              decoration: InputDecoration(
+                hintText: 'ابحث عن تطبيق...',
+                hintStyle: const TextStyle(
+                    color: Color(0xFF445544), fontFamily: 'Cairo'),
+                prefixIcon:
+                    const Icon(Icons.search, color: Color(0xFF00FF88), size: 20),
+                filled: true,
+                fillColor: const Color(0xFF050D08),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide:
+                      const BorderSide(color: Color(0xFF00FF88), width: 0.5),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(
+                      color: const Color(0xFF00FF88).withOpacity(0.3),
+                      width: 0.5),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide:
+                      const BorderSide(color: Color(0xFF00FF88), width: 1),
+                ),
+                contentPadding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              onChanged: (v) => setState(() => _search = v),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: filtered.isEmpty
+                ? const Center(
+                    child: Text('لا توجد نتائج',
+                        style: TextStyle(
+                            color: Color(0xFF445544), fontFamily: 'Cairo')))
+                : ListView.builder(
+                    controller: ctrl,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    itemCount: filtered.length,
+                    itemBuilder: (_, i) {
+                      final app = filtered[i];
+                      return _AppTile(
+                        app: app,
+                        onTap: () => widget.onSelected(app),
+                      );
+                    },
+                  ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// App Tile
+// ────────────────────────────────────────────────────────────────────────────
+class _AppTile extends StatelessWidget {
+  final Map<String, dynamic> app;
+  final VoidCallback onTap;
+  const _AppTile({required this.app, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF050D08),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.15)),
+        ),
+        child: Row(children: [
+          _AppIcon(iconBase64: app['icon'] as String? ?? '', size: 48),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                app['name'] as String? ?? '',
+                style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                    fontFamily: 'Cairo'),
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                app['package'] as String? ?? '',
+                style: TextStyle(
+                    color: const Color(0xFF00FF88).withOpacity(0.7),
+                    fontFamily: 'Courier',
+                    fontSize: 11),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ]),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF00FF88).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(Icons.bolt,
+                color: Color(0xFF00FF88), size: 20),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// App Icon Widget (renders Base64 PNG or placeholder)
+// ────────────────────────────────────────────────────────────────────────────
+class _AppIcon extends StatelessWidget {
+  final String iconBase64;
+  final double size;
+  const _AppIcon({required this.iconBase64, required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    if (iconBase64.isNotEmpty) {
+      try {
+        final bytes = base64Decode(iconBase64);
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(size * 0.22),
+          child: Image.memory(
+            Uint8List.fromList(bytes),
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _placeholder(),
+          ),
+        );
+      } catch (_) {}
+    }
+    return _placeholder();
+  }
+
+  Widget _placeholder() => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: const Color(0xFF001A0A),
+          borderRadius: BorderRadius.circular(size * 0.22),
+          border: Border.all(
+              color: const Color(0xFF00FF88).withOpacity(0.3)),
+        ),
+        child: Icon(Icons.android,
+            color: const Color(0xFF00FF88).withOpacity(0.6),
+            size: size * 0.55),
+      );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase enum
+// ────────────────────────────────────────────────────────────────────────────
+enum _Phase { idle, loadingApps, running, done }
