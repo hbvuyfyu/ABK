@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+import '../../providers/auth_provider.dart';
 import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 
@@ -21,6 +23,19 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     setState(() { _loading = true; _error = null; });
     try {
       final res = await ApiService.get('/admin/dashboard');
+      final statusCode = res['_statusCode'] as int? ?? 0;
+      if (statusCode == 401) {
+        if (mounted) {
+          await Provider.of<AuthProvider>(context, listen: false).logout();
+          context.go('/login');
+        }
+        return;
+      }
+      if (statusCode == 403) {
+        setState(() => _error = 'ليس لديك صلاحية الأدمن\nيجب ترقية حسابك أولاً');
+        setState(() => _loading = false);
+        return;
+      }
       if (res['success'] == true) {
         setState(() => _stats = res['data'] as Map<String, dynamic>);
       } else {

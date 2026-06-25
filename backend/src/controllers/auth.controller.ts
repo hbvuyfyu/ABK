@@ -1,78 +1,103 @@
 import { Request, Response } from 'express';
-  import bcrypt from 'bcryptjs';
-  import jwt, { SignOptions } from 'jsonwebtoken';
-  import prisma from '../utils/prisma';
+import bcrypt from 'bcryptjs';
+import jwt, { SignOptions } from 'jsonwebtoken';
+import prisma from '../utils/prisma';
 
-  function makeToken(payload: object): string {
-    const secret = process.env.JWT_SECRET || 'secret';
-    const opts: SignOptions = { expiresIn: (process.env.JWT_EXPIRES_IN || '7d') as SignOptions['expiresIn'] };
-    return jwt.sign(payload, secret, opts);
+function makeToken(payload: object): string {
+  const secret = process.env.JWT_SECRET || 'secret';
+  const opts: SignOptions = { expiresIn: (process.env.JWT_EXPIRES_IN || '7d') as SignOptions['expiresIn'] };
+  return jwt.sign(payload, secret, opts);
+}
+
+export const register = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password) {
+      res.status(400).json({ success: false, message: 'Email and password are required' });
+      return;
+    }
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      res.status(409).json({ success: false, message: 'Email already registered' });
+      return;
+    }
+    const hashed = await bcrypt.hash(password, 12);
+    const user = await prisma.user.create({
+      data: { email, password: hashed, name },
+      select: { id: true, email: true, name: true, role: true, createdAt: true },
+    });
+    const token = makeToken({ id: user.id, email: user.email, role: user.role });
+    res.status(201).json({ success: true, data: { user, token } });
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error' });
   }
+};
 
-  export const register = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { email, password, name } = req.body;
-      if (!email || !password) {
-        res.status(400).json({ success: false, message: 'Email and password are required' });
-        return;
-      }
-      const existing = await prisma.user.findUnique({ where: { email } });
-      if (existing) {
-        res.status(409).json({ success: false, message: 'Email already registered' });
-        return;
-      }
-      const hashed = await bcrypt.hash(password, 12);
-      const user = await prisma.user.create({
-        data: { email, password: hashed, name },
-        select: { id: true, email: true, name: true, role: true, createdAt: true },
-      });
-      const token = makeToken({ id: user.id, email: user.email, role: user.role });
-      res.status(201).json({ success: true, data: { user, token } });
-    } catch {
-      res.status(500).json({ success: false, message: 'Server error' });
+export const login = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      res.status(400).json({ success: false, message: 'Email and password are required' });
+      return;
     }
-  };
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !user.isActive) {
+      res.status(401).json({ success: false, message: 'Invalid credentials' });
+      return;
+    }
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) {
+      res.status(401).json({ success: false, message: 'Invalid credentials' });
+      return;
+    }
+    const token = makeToken({ id: user.id, email: user.email, role: user.role });
+    res.json({
+      success: true,
+      data: {
+        user: { id: user.id, email: user.email, name: user.name, role: user.role },
+        token,
+      },
+    });
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
 
-  export const login = async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { email, password } = req.body;
-      if (!email || !password) {
-        res.status(400).json({ success: false, message: 'Email and password are required' });
-        return;
-      }
-      const user = await prisma.user.findUnique({ where: { email } });
-      if (!user || !user.isActive) {
-        res.status(401).json({ success: false, message: 'Invalid credentials' });
-        return;
-      }
-      const valid = await bcrypt.compare(password, user.password);
-      if (!valid) {
-        res.status(401).json({ success: false, message: 'Invalid credentials' });
-        return;
-      }
-      const token = makeToken({ id: user.id, email: user.email, role: user.role });
-      res.json({
-        success: true,
-        data: {
-          user: { id: user.id, email: user.email, name: user.name, role: user.role },
-          token,
-        },
-      });
-    } catch {
-      res.status(500).json({ success: false, message: 'Server error' });
-    }
-  };
+export const getMe = async (req: any, res: Response): Promise<void> => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id: true, email: true, name: true, role: true, createdAt: true },
+    });
+    res.json({ success: true, data: user });
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
 
-  export const getMe = async (req: any, res: Response): Promise<void> => {
-    try {
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.id },
-        select: { id: true, email: true, name: true, role: true, createdAt: true },
-      });
-      res.json({ success: true, data: user });
-    } catch (error) {
-      console.error('Register error:', error);
-      res.status(500).json({ success: false, message: 'Server error', error: String(error) });
+// One-time endpoint: promote any user to ADMIN using the JWT_SECRET as the setup key
+// Usage: POST /api/auth/promote-admin  { "email": "...", "setupKey": "<JWT_SECRET value>" }
+export const promoteToAdmin = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, setupKey } = req.body;
+    const expectedKey = process.env.JWT_SECRET || 'secret';
+    if (!setupKey || setupKey !== expectedKey) {
+      res.status(403).json({ success: false, message: 'Invalid setup key' });
+      return;
     }
-  };
-  
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+    const updated = await prisma.user.update({
+      where: { email },
+      data: { role: 'ADMIN' },
+      select: { id: true, email: true, name: true, role: true },
+    });
+    const token = makeToken({ id: updated.id, email: updated.email, role: updated.role });
+    res.json({ success: true, data: { user: updated, token, message: 'User promoted to ADMIN. Use the new token.' } });
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

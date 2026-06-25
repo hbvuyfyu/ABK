@@ -53,9 +53,9 @@ class ApiService {
   static Map<String, dynamic> _parse(http.Response res) {
     try {
       final data = jsonDecode(res.body) as Map<String, dynamic>;
-      return data;
+      return {...data, '_statusCode': res.statusCode};
     } catch (_) {
-      return {'success': false, 'message': 'Invalid response from server'};
+      return {'success': false, 'message': 'Invalid response from server', '_statusCode': res.statusCode};
     }
   }
 }
