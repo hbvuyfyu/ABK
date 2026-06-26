@@ -222,8 +222,8 @@ class MainActivity : FlutterActivity() {
 """.trimIndent()
 
     private fun resolvePid(pkgName: String): Int {
-        var (out, _) = execSuOutput("pidof '$pkgName' 2>/dev/null | awk '{print \$1}'", 4)
-        out.trim().toIntOrNull()?.let { if (it > 0) return it }
+        val (pidOut, _) = execSuOutput("pidof '$pkgName' 2>/dev/null | awk '{print \$1}'", 4)
+        pidOut.trim().toIntOrNull()?.let { if (it > 0) return it }
         val (psOut, _) = execSuOutput("ps -A 2>/dev/null | grep '$pkgName' | head -1", 4)
         return psOut.trim().split(Regex("\\s+")).getOrNull(1)?.toIntOrNull() ?: -1
     }

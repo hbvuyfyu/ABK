@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'dart:io';
 import 'package:go_router/go_router.dart';
 import '../../theme/app_theme.dart';
@@ -89,8 +88,9 @@ class _EngineGuardScreenState extends State<EngineGuardScreen>
   }
 
   Widget _buildLockedScreen() {
-    return WillPopScope(
-      onWillPop: () async { context.go('/'); return false; },
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) { if (!didPop) context.go('/'); },
       child: Scaffold(
         backgroundColor: AppTheme.background,
         body: SafeArea(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
