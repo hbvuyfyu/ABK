@@ -133,17 +133,26 @@ class MainActivity : FlutterActivity() {
                     "output" to "[-] لم يتم العثور على process لـ: $pkgName\n[*] تأكد أن التطبيق مفتوح.")
             }
 
+            // Fix frida OAT cache permissions (fixes "Permission denied" on emulators)
+            execSuOutput(
+                "mkdir -p /data/local/tmp/oat/x86 /data/local/tmp/oat/x86_64 /data/local/tmp/oat/arm64 /data/local/tmp/oat/arm && " +
+                "chmod -R 777 /data/local/tmp/oat 2>/dev/null; " +
+                "chmod 1777 /data/local/tmp 2>/dev/null; " +
+                "setenforce 0 2>/dev/null",
+                5
+            )
+
             // Find a working frida binary
             val (binary, mode) = findFridaBinary()
                 ?: return mapOf("success" to false,
                     "output" to buildNotFoundMessage())
 
-            // Build command based on detected binary type
+            // Build command — --runtime=v8 avoids ART/dex compilation permission issues
             val cmd = when (mode) {
-                BinMode.INJECT_LOCAL  -> "$binary --pid=$targetPid --script=$scriptDest 2>&1"
-                BinMode.INJECT_USB    -> "$binary -U --pid $targetPid -l $scriptDest 2>&1"
-                BinMode.FRIDA_LOCAL   -> "$binary -H 127.0.0.1:27042 --pid $targetPid -l $scriptDest 2>&1"
-                BinMode.FRIDA_USB     -> "$binary -U --pid $targetPid -l $scriptDest 2>&1"
+                BinMode.INJECT_LOCAL  -> "$binary --pid=$targetPid --script=$scriptDest --runtime=v8 2>&1"
+                BinMode.INJECT_USB    -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 2>&1"
+                BinMode.FRIDA_LOCAL   -> "$binary -H 127.0.0.1:27042 --pid $targetPid -l $scriptDest --runtime=v8 2>&1"
+                BinMode.FRIDA_USB     -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 2>&1"
             }
 
             val (out, _) = execSuOutput(cmd, 14)
