@@ -15,10 +15,14 @@ class JumperBridge {
     return raw.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
-  static Future<Map<String, dynamic>> runJumper(String packageName) async {
+  /// Inject into the selected app by PID (most reliable) with packageName as fallback
+  static Future<Map<String, dynamic>> runJumper({
+    required int pid,
+    required String packageName,
+  }) async {
     final raw = await _ch.invokeMapMethod<String, dynamic>(
       'runJumper',
-      {'packageName': packageName},
+      {'pid': pid, 'packageName': packageName},
     );
     return Map<String, dynamic>.from(raw ?? {});
   }
@@ -35,15 +39,12 @@ class JumperEngineScreen extends StatefulWidget {
 
 class _JumperEngineScreenState extends State<JumperEngineScreen>
     with TickerProviderStateMixin {
-  // State
   _Phase _phase = _Phase.idle;
   List<Map<String, dynamic>> _apps = [];
   Map<String, dynamic>? _selected;
   List<String> _consoleLines = [];
   bool? _success;
-  String _statusText = '';
 
-  // Animations
   late final AnimationController _glowCtrl;
   late final AnimationController _pulseCtrl;
   late final Animation<double> _glow;
@@ -54,14 +55,10 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
     super.initState();
     _glowCtrl = AnimationController(vsync: this, duration: const Duration(seconds: 2))
       ..repeat(reverse: true);
-    _pulseCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 800))
+    _pulseCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 700))
       ..repeat(reverse: true);
-    _glow = Tween<double>(begin: 0.3, end: 1.0).animate(
-      CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut),
-    );
-    _pulse = Tween<double>(begin: 0.8, end: 1.2).animate(
-      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
-    );
+    _glow  = Tween<double>(begin: 0.3, end: 1.0).animate(CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut));
+    _pulse = Tween<double>(begin: 0.85, end: 1.15).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
   }
 
   @override
@@ -73,32 +70,24 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
 
   // ── Load running apps ──────────────────────────────────────────────────────
   Future<void> _openAppPicker() async {
-    setState(() {
-      _phase = _Phase.loadingApps;
-      _statusText = 'جاري جلب التطبيقات المفتوحة...';
-    });
-
+    setState(() { _phase = _Phase.loadingApps; });
     try {
       final apps = await JumperBridge.getRunningApps();
       if (!mounted) return;
       if (apps.isEmpty) {
-        _showError('لم يتم العثور على تطبيقات مفتوحة');
+        _showSnack('لم يتم العثور على تطبيقات مفتوحة');
         setState(() => _phase = _Phase.idle);
         return;
       }
-      setState(() {
-        _apps = apps;
-        _phase = _Phase.idle;
-      });
+      setState(() { _apps = apps; _phase = _Phase.idle; });
       _showAppPicker();
     } catch (e) {
       if (!mounted) return;
-      _showError('فشل جلب التطبيقات: $e');
+      _showSnack('فشل جلب التطبيقات: $e');
       setState(() => _phase = _Phase.idle);
     }
   }
 
-  // ── App picker bottom sheet ────────────────────────────────────────────────
   void _showAppPicker() {
     showModalBottomSheet(
       context: context,
@@ -106,82 +95,75 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
       backgroundColor: Colors.transparent,
       builder: (_) => _AppPickerSheet(
         apps: _apps,
-        onSelected: (app) {
-          Navigator.pop(context);
-          _executeJumper(app);
-        },
+        onSelected: (app) { Navigator.pop(context); _executeJumper(app); },
       ),
     );
   }
 
-  // ── Execute script ─────────────────────────────────────────────────────────
+  // ── Execute Frida injection ─────────────────────────────────────────────────
   Future<void> _executeJumper(Map<String, dynamic> app) async {
+    final pid        = app['pid'] as int? ?? -1;
+    final pkgName    = app['package'] as String? ?? '';
+    final appName    = app['name'] as String? ?? pkgName;
+
     setState(() {
-      _selected = app;
-      _phase = _Phase.running;
+      _selected     = app;
+      _phase        = _Phase.running;
       _consoleLines = [];
-      _success = null;
-      _statusText = 'تشغيل المحرك...';
+      _success      = null;
     });
 
-    // Animated console lines before actual execution
+    // Animated pre-injection console lines
     final preLines = [
       '[*] 07-JUMPER initialising...',
-      '[*] Target: ${app['package']}',
-      '[*] Connecting to Frida server...',
-      '[*] Injecting into process...',
-      '[*] Waiting for script execution (4s delay)...',
+      '[*] Target app : $appName',
+      '[*] Package    : $pkgName',
+      '[*] Process PID: ${pid > 0 ? pid.toString() : "resolving..."}',
+      '[*] Copying script to /data/local/tmp/jumper_07.js',
+      '[*] Connecting to Frida server on USB...',
+      '[*] Attaching to process via PID $pid...',
+      '[*] Script loaded — waiting 4s for Java runtime...',
     ];
     for (final line in preLines) {
-      await Future.delayed(const Duration(milliseconds: 400));
+      await Future.delayed(const Duration(milliseconds: 350));
       if (!mounted) return;
       setState(() => _consoleLines.add(line));
     }
 
     try {
-      final result = await JumperBridge.runJumper(app['package'] as String);
+      final result = await JumperBridge.runJumper(pid: pid, packageName: pkgName);
       if (!mounted) return;
 
-      final success = result['success'] as bool? ?? false;
+      final success   = result['success'] as bool? ?? false;
       final rawOutput = result['output'] as String? ?? '';
 
-      // Append real output lines
+      // Stream real output lines with typing effect
       for (final line in rawOutput.split('\n')) {
-        if (line.trim().isEmpty) continue;
-        await Future.delayed(const Duration(milliseconds: 120));
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        await Future.delayed(const Duration(milliseconds: 100));
         if (!mounted) return;
-        setState(() => _consoleLines.add(line));
+        setState(() => _consoleLines.add(trimmed));
       }
 
-      await Future.delayed(const Duration(milliseconds: 500));
+      await Future.delayed(const Duration(milliseconds: 400));
       if (!mounted) return;
-      setState(() {
-        _success = success;
-        _phase = _Phase.done;
-        _statusText = success ? 'تمت العملية بنجاح ✓' : 'انتهت العملية';
-      });
+      setState(() { _success = success; _phase = _Phase.done; });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _consoleLines.add('[-] Exception: $e');
+        _consoleLines.add('[-] Flutter error: $e');
         _success = false;
-        _phase = _Phase.done;
-        _statusText = 'حدث خطأ';
+        _phase   = _Phase.done;
       });
     }
   }
 
-  void _reset() {
-    setState(() {
-      _phase = _Phase.idle;
-      _selected = null;
-      _consoleLines = [];
-      _success = null;
-      _statusText = '';
-    });
-  }
+  void _reset() => setState(() {
+    _phase = _Phase.idle; _selected = null; _consoleLines = []; _success = null;
+  });
 
-  void _showError(String msg) {
+  void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg, style: const TextStyle(fontFamily: 'Cairo')),
@@ -195,169 +177,106 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
         title: Row(mainAxisSize: MainAxisSize.min, children: [
           AnimatedBuilder(
             animation: _glow,
-            builder: (_, __) => Icon(
-              Icons.electric_bolt,
-              color: const Color(0xFF00FF88).withOpacity(_glow.value),
-              size: 22,
-            ),
+            builder: (_, __) => Icon(Icons.electric_bolt,
+                color: const Color(0xFF00FF88).withOpacity(_glow.value), size: 22),
           ),
           const SizedBox(width: 8),
           const Text('محرك الجمبرة',
               style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold)),
         ]),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
       ),
       body: switch (_phase) {
-        _Phase.idle => _buildIdle(),
+        _Phase.idle        => _buildIdle(),
         _Phase.loadingApps => _buildLoadingApps(),
         _Phase.running || _Phase.done => _buildConsole(),
       },
     );
   }
 
-  // ── Idle view ──────────────────────────────────────────────────────────────
-  Widget _buildIdle() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          // Glowing icon
-          AnimatedBuilder(
-            animation: _glow,
-            builder: (_, __) => Container(
-              width: 140,
-              height: 140,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF001A0A),
-                border: Border.all(
-                  color: const Color(0xFF00FF88).withOpacity(_glow.value),
-                  width: 2,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF00FF88).withOpacity(_glow.value * 0.4),
-                    blurRadius: 40,
-                    spreadRadius: 10,
-                  ),
-                ],
-              ),
-              child: Center(
-                child: Text(
-                  '⚡',
-                  style: TextStyle(
-                    fontSize: 64,
-                    shadows: [
-                      Shadow(
-                        color: const Color(0xFF00FF88).withOpacity(_glow.value),
-                        blurRadius: 20,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 32),
-          const Text(
-            'محرك الجمبرة',
-            style: TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF00FF88),
-              fontFamily: 'Cairo',
-              letterSpacing: 2,
-            ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            '07-JuMper Script Engine',
-            style: TextStyle(
-              fontSize: 13,
-              color: Color(0xFF00FF88),
-              fontFamily: 'Courier',
-              letterSpacing: 3,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF001A0A),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.2)),
-            ),
-            child: const Text(
-              'يتصل بـ AppsFlyer SDK\nويرسل event: power_5w',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Color(0xFF88FFBB),
-                fontFamily: 'Cairo',
-                fontSize: 13,
-                height: 1.6,
-              ),
-            ),
-          ),
-          const SizedBox(height: 40),
-          // Launch button
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _openAppPicker,
-              icon: const Icon(Icons.rocket_launch, size: 22),
-              label: const Text(
-                'اختر تطبيقاً وابدأ',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, fontFamily: 'Cairo'),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF00FF88),
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(vertical: 18),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                elevation: 0,
-                shadowColor: Colors.transparent,
-              ),
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  // ── Loading apps ───────────────────────────────────────────────────────────
-  Widget _buildLoadingApps() {
-    return Center(
+  // ── Idle ───────────────────────────────────────────────────────────────────
+  Widget _buildIdle() => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(32),
       child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
         AnimatedBuilder(
-          animation: _pulse,
-          builder: (_, __) => Transform.scale(
-            scale: _pulse.value,
-            child: const Icon(Icons.apps, color: Color(0xFF00FF88), size: 64),
+          animation: _glow,
+          builder: (_, __) => Container(
+            width: 140, height: 140,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFF001A0A),
+              border: Border.all(color: const Color(0xFF00FF88).withOpacity(_glow.value), width: 2),
+              boxShadow: [BoxShadow(color: const Color(0xFF00FF88).withOpacity(_glow.value * 0.4), blurRadius: 40, spreadRadius: 10)],
+            ),
+            child: const Center(child: Text('⚡', style: TextStyle(fontSize: 64))),
           ),
         ),
-        const SizedBox(height: 24),
-        const Text(
-          'جاري جلب التطبيقات المفتوحة...',
-          style: TextStyle(
-              color: Color(0xFF00FF88), fontFamily: 'Cairo', fontSize: 16),
+        const SizedBox(height: 28),
+        const Text('محرك الجمبرة',
+            style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Color(0xFF00FF88), fontFamily: 'Cairo', letterSpacing: 2)),
+        const SizedBox(height: 4),
+        const Text('07-JuMper · PID Injection Engine',
+            style: TextStyle(fontSize: 12, color: Color(0xFF005500), fontFamily: 'Courier', letterSpacing: 2)),
+        const SizedBox(height: 20),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: const Color(0xFF001A0A),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.2)),
+          ),
+          child: const Text(
+            'يحقن السكريبت مباشرةً داخل عملية التطبيق\nعبر Frida PID Injection\nويُرسل event: power_5w عبر AppsFlyer',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xFF88FFBB), fontFamily: 'Cairo', fontSize: 13, height: 1.7),
+          ),
         ),
-        const SizedBox(height: 16),
-        const SizedBox(
-          width: 200,
-          child: LinearProgressIndicator(
-            color: Color(0xFF00FF88),
-            backgroundColor: Color(0xFF001A0A),
+        const SizedBox(height: 36),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _openAppPicker,
+            icon: const Icon(Icons.rocket_launch, size: 22),
+            label: const Text('اختر تطبيقاً وابدأ الحقن',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, fontFamily: 'Cairo')),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF00FF88),
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(vertical: 18),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              elevation: 0,
+            ),
           ),
         ),
       ]),
-    );
-  }
+    ),
+  );
 
-  // ── Console / Result ───────────────────────────────────────────────────────
+  // ── Loading apps ───────────────────────────────────────────────────────────
+  Widget _buildLoadingApps() => Center(
+    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      AnimatedBuilder(
+        animation: _pulse,
+        builder: (_, __) => Transform.scale(
+          scale: _pulse.value,
+          child: const Icon(Icons.apps, color: Color(0xFF00FF88), size: 64),
+        ),
+      ),
+      const SizedBox(height: 24),
+      const Text('جاري جلب التطبيقات والـ PIDs...',
+          style: TextStyle(color: Color(0xFF00FF88), fontFamily: 'Cairo', fontSize: 16)),
+      const SizedBox(height: 16),
+      const SizedBox(width: 200,
+          child: LinearProgressIndicator(color: Color(0xFF00FF88), backgroundColor: Color(0xFF001A0A))),
+    ]),
+  );
+
+  // ── Console + Result ───────────────────────────────────────────────────────
   Widget _buildConsole() {
     final isRunning = _phase == _Phase.running;
     final isSuccess = _success == true;
@@ -366,8 +285,8 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
       // Target app header
       if (_selected != null)
         Container(
-          margin: const EdgeInsets.all(16),
-          padding: const EdgeInsets.all(16),
+          margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: const Color(0xFF001A0A),
             borderRadius: BorderRadius.circular(16),
@@ -376,119 +295,75 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
           child: Row(children: [
             _AppIcon(iconBase64: _selected!['icon'] as String? ?? '', size: 44),
             const SizedBox(width: 12),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(
-                  _selected!['name'] as String? ?? '',
-                  style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      fontFamily: 'Cairo'),
-                ),
-                Text(
-                  _selected!['package'] as String? ?? '',
-                  style: const TextStyle(
-                      color: Color(0xFF00FF88),
-                      fontFamily: 'Courier',
-                      fontSize: 11),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ]),
-            ),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(_selected!['name'] as String? ?? '',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'Cairo')),
+              Text(_selected!['package'] as String? ?? '',
+                  style: const TextStyle(color: Color(0xFF00FF88), fontFamily: 'Courier', fontSize: 10),
+                  overflow: TextOverflow.ellipsis),
+              Text('PID: ${_selected!['pid'] ?? "?"}',
+                  style: const TextStyle(color: Color(0xFF005500), fontFamily: 'Courier', fontSize: 10)),
+            ])),
+            const SizedBox(width: 8),
             if (isRunning)
               AnimatedBuilder(
                 animation: _pulse,
-                builder: (_, __) => Container(
-                  width: 12,
-                  height: 12,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFF00FF88)
-                        .withOpacity(_pulse.value),
-                  ),
-                ),
+                builder: (_, __) => Container(width: 12, height: 12,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF00FF88).withOpacity(_pulse.value))),
               )
             else
-              Icon(
-                isSuccess ? Icons.check_circle : Icons.cancel,
-                color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error,
-                size: 28,
-              ),
+              Icon(isSuccess ? Icons.check_circle : Icons.cancel,
+                  color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error, size: 28),
           ]),
         ),
 
-      // Console output
+      // Terminal console
       Expanded(
         child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16),
-          padding: const EdgeInsets.all(16),
+          margin: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: const Color(0xFF050D08),
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.15)),
           ),
           child: Column(children: [
-            // Terminal header bar
             Row(children: [
-              _dot(const Color(0xFFFF5F57)),
+              _termDot(const Color(0xFFFF5F57)),
               const SizedBox(width: 6),
-              _dot(const Color(0xFFFFBD2E)),
+              _termDot(const Color(0xFFFFBD2E)),
               const SizedBox(width: 6),
-              _dot(const Color(0xFF28CA41)),
+              _termDot(const Color(0xFF28CA41)),
               const SizedBox(width: 12),
-              const Text('frida console',
-                  style: TextStyle(
-                      color: Color(0xFF445544), fontFamily: 'Courier', fontSize: 12)),
+              const Text('frida · pid injection',
+                  style: TextStyle(color: Color(0xFF334433), fontFamily: 'Courier', fontSize: 11)),
               const Spacer(),
               if (isRunning)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Color(0xFF00FF88),
-                  ),
-                ),
+                const SizedBox(width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00FF88))),
             ]),
-            const SizedBox(height: 12),
-            const Divider(color: Color(0xFF1A2E1A), height: 1),
+            const SizedBox(height: 10),
+            const Divider(color: Color(0xFF0D1F0D), height: 1),
             const SizedBox(height: 8),
-            // Lines
             Expanded(
               child: ListView.builder(
                 itemCount: _consoleLines.length + (isRunning ? 1 : 0),
                 itemBuilder: (_, i) {
                   if (i == _consoleLines.length) {
-                    // Blinking cursor
                     return AnimatedBuilder(
                       animation: _pulse,
-                      builder: (_, __) => Text(
-                        _pulse.value > 1.0 ? '█' : ' ',
-                        style: const TextStyle(
-                            color: Color(0xFF00FF88), fontFamily: 'Courier', fontSize: 13),
-                      ),
+                      builder: (_, __) => Text(_pulse.value > 1.0 ? '█' : ' ',
+                          style: const TextStyle(color: Color(0xFF00FF88), fontFamily: 'Courier', fontSize: 13)),
                     );
                   }
                   final line = _consoleLines[i];
-                  final color = line.startsWith('[+]')
-                      ? const Color(0xFF00FF88)
-                      : line.startsWith('[-]')
-                          ? AppTheme.error
-                          : line.startsWith('[*]')
-                              ? const Color(0xFFFFBD2E)
-                              : const Color(0xFF88BB88);
+                  final color = line.startsWith('[+]') ? const Color(0xFF00FF88)
+                      : line.startsWith('[-]') ? AppTheme.error
+                      : line.startsWith('[*]') ? const Color(0xFFFFBD2E)
+                      : const Color(0xFF779977);
                   return Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Text(
-                      line,
-                      style: TextStyle(
-                        color: color,
-                        fontFamily: 'Courier',
-                        fontSize: 12,
-                        height: 1.5,
-                      ),
-                    ),
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(line, style: TextStyle(color: color, fontFamily: 'Courier', fontSize: 12, height: 1.5)),
                   );
                 },
               ),
@@ -497,66 +372,41 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
         ),
       ),
 
-      // Result banner + action button
+      // Result banner
       if (_phase == _Phase.done) ...[
-        const SizedBox(height: 16),
         Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16),
-          padding: const EdgeInsets.all(16),
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: isSuccess
-                ? const Color(0xFF00FF88).withOpacity(0.1)
-                : AppTheme.error.withOpacity(0.1),
+            color: isSuccess ? const Color(0xFF00FF88).withOpacity(0.1) : AppTheme.error.withOpacity(0.1),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: isSuccess
-                  ? const Color(0xFF00FF88).withOpacity(0.4)
-                  : AppTheme.error.withOpacity(0.4),
-            ),
+            border: Border.all(color: isSuccess ? const Color(0xFF00FF88).withOpacity(0.4) : AppTheme.error.withOpacity(0.4)),
           ),
           child: Row(children: [
-            Icon(
-              isSuccess ? Icons.check_circle_outline : Icons.error_outline,
-              color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error,
-              size: 32,
-            ),
+            Icon(isSuccess ? Icons.check_circle_outline : Icons.error_outline,
+                color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error, size: 30),
             const SizedBox(width: 12),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(
-                  isSuccess ? 'تمت العملية بنجاح!' : 'انتهت العملية',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error,
-                    fontFamily: 'Cairo',
-                  ),
-                ),
-                Text(
-                  isSuccess
-                      ? 'تم إرسال event power_5w عبر AppsFlyer'
-                      : 'راجع الـ console للتفاصيل',
-                  style: const TextStyle(
-                      color: Color(0xFF88BB88), fontFamily: 'Cairo', fontSize: 12),
-                ),
-              ]),
-            ),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(isSuccess ? 'تم الحقن بنجاح! ✓' : 'انتهت العملية',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold,
+                      color: isSuccess ? const Color(0xFF00FF88) : AppTheme.error, fontFamily: 'Cairo')),
+              Text(isSuccess ? 'تم إرسال event power_5w عبر AppsFlyer SDK' : 'راجع الـ console أعلاه للتفاصيل',
+                  style: const TextStyle(color: Color(0xFF779977), fontFamily: 'Cairo', fontSize: 12)),
+            ])),
           ]),
         ),
-        const SizedBox(height: 12),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           child: Row(children: [
             Expanded(
               child: OutlinedButton.icon(
                 onPressed: _reset,
-                icon: const Icon(Icons.refresh, size: 18),
-                label: const Text('تشغيل مجدداً', style: TextStyle(fontFamily: 'Cairo')),
+                icon: const Icon(Icons.arrow_back, size: 18),
+                label: const Text('تطبيق آخر', style: TextStyle(fontFamily: 'Cairo')),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFF00FF88),
-                  side: const BorderSide(color: Color(0xFF00FF88)),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
+                    foregroundColor: const Color(0xFF00FF88),
+                    side: const BorderSide(color: Color(0xFF00FF88)),
+                    padding: const EdgeInsets.symmetric(vertical: 14)),
               ),
             ),
             const SizedBox(width: 12),
@@ -564,26 +414,21 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
               child: ElevatedButton.icon(
                 onPressed: () => _executeJumper(_selected!),
                 icon: const Icon(Icons.bolt, size: 18),
-                label: const Text('إعادة التنفيذ', style: TextStyle(fontFamily: 'Cairo')),
+                label: const Text('إعادة الحقن', style: TextStyle(fontFamily: 'Cairo')),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00FF88),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
+                    backgroundColor: const Color(0xFF00FF88),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 14)),
               ),
             ),
           ]),
         ),
-      ],
-      const SizedBox(height: 16),
+      ] else
+        const SizedBox(height: 16),
     ]);
   }
 
-  Widget _dot(Color color) => Container(
-        width: 12,
-        height: 12,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      );
+  Widget _termDot(Color c) => Container(width: 12, height: 12, decoration: BoxDecoration(color: c, shape: BoxShape.circle));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -592,32 +437,23 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
 class _AppPickerSheet extends StatefulWidget {
   final List<Map<String, dynamic>> apps;
   final void Function(Map<String, dynamic>) onSelected;
-
   const _AppPickerSheet({required this.apps, required this.onSelected});
-
-  @override
-  State<_AppPickerSheet> createState() => _AppPickerSheetState();
+  @override State<_AppPickerSheet> createState() => _AppPickerSheetState();
 }
 
 class _AppPickerSheetState extends State<_AppPickerSheet> {
-  String _search = '';
+  String _q = '';
 
   @override
   Widget build(BuildContext context) {
-    final filtered = widget.apps
+    final list = widget.apps
         .where((a) =>
-            (a['name'] as String)
-                .toLowerCase()
-                .contains(_search.toLowerCase()) ||
-            (a['package'] as String)
-                .toLowerCase()
-                .contains(_search.toLowerCase()))
+            (a['name'] as String).toLowerCase().contains(_q.toLowerCase()) ||
+            (a['package'] as String).toLowerCase().contains(_q.toLowerCase()))
         .toList();
 
     return DraggableScrollableSheet(
-      initialChildSize: 0.85,
-      minChildSize: 0.4,
-      maxChildSize: 0.95,
+      initialChildSize: 0.85, minChildSize: 0.4, maxChildSize: 0.95,
       builder: (_, ctrl) => Container(
         decoration: const BoxDecoration(
           color: Color(0xFF0A1A0A),
@@ -625,83 +461,42 @@ class _AppPickerSheetState extends State<_AppPickerSheet> {
           border: Border(top: BorderSide(color: Color(0xFF00FF88), width: 1)),
         ),
         child: Column(children: [
-          // Handle
           const SizedBox(height: 12),
-          Container(
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: const Color(0xFF00FF88).withOpacity(0.3),
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Title
+          Container(width: 40, height: 4, decoration: BoxDecoration(color: const Color(0xFF00FF88).withOpacity(0.3), borderRadius: BorderRadius.circular(2))),
+          const SizedBox(height: 14),
           Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            const Icon(Icons.apps, color: Color(0xFF00FF88), size: 20),
+            const Icon(Icons.apps, color: Color(0xFF00FF88), size: 18),
             const SizedBox(width: 8),
-            Text(
-              'اختر التطبيق (${widget.apps.length} مفتوح)',
-              style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                  fontFamily: 'Cairo'),
-            ),
+            Text('اختر التطبيق (${widget.apps.length} مفتوح)',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white, fontFamily: 'Cairo')),
           ]),
-          const SizedBox(height: 12),
-          // Search
+          const SizedBox(height: 10),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: TextField(
               style: const TextStyle(color: Colors.white, fontFamily: 'Cairo'),
               decoration: InputDecoration(
                 hintText: 'ابحث عن تطبيق...',
-                hintStyle: const TextStyle(
-                    color: Color(0xFF445544), fontFamily: 'Cairo'),
-                prefixIcon:
-                    const Icon(Icons.search, color: Color(0xFF00FF88), size: 20),
-                filled: true,
-                fillColor: const Color(0xFF050D08),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide:
-                      const BorderSide(color: Color(0xFF00FF88), width: 0.5),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                      color: const Color(0xFF00FF88).withOpacity(0.3),
-                      width: 0.5),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide:
-                      const BorderSide(color: Color(0xFF00FF88), width: 1),
-                ),
+                hintStyle: const TextStyle(color: Color(0xFF445544), fontFamily: 'Cairo'),
+                prefixIcon: const Icon(Icons.search, color: Color(0xFF00FF88), size: 20),
+                filled: true, fillColor: const Color(0xFF050D08),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF00FF88), width: 0.5)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: const Color(0xFF00FF88).withOpacity(0.3), width: 0.5)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF00FF88), width: 1)),
                 contentPadding: const EdgeInsets.symmetric(vertical: 12),
               ),
-              onChanged: (v) => setState(() => _search = v),
+              onChanged: (v) => setState(() => _q = v),
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Expanded(
-            child: filtered.isEmpty
-                ? const Center(
-                    child: Text('لا توجد نتائج',
-                        style: TextStyle(
-                            color: Color(0xFF445544), fontFamily: 'Cairo')))
+            child: list.isEmpty
+                ? const Center(child: Text('لا توجد نتائج', style: TextStyle(color: Color(0xFF445544), fontFamily: 'Cairo')))
                 : ListView.builder(
                     controller: ctrl,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    itemCount: filtered.length,
-                    itemBuilder: (_, i) {
-                      final app = filtered[i];
-                      return _AppTile(
-                        app: app,
-                        onTap: () => widget.onSelected(app),
-                      );
-                    },
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    itemCount: list.length,
+                    itemBuilder: (_, i) => _AppTile(app: list[i], onTap: () => widget.onSelected(list[i])),
                   ),
           ),
         ]),
@@ -711,7 +506,7 @@ class _AppPickerSheetState extends State<_AppPickerSheet> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// App Tile
+// App Tile — shows PID badge
 // ────────────────────────────────────────────────────────────────────────────
 class _AppTile extends StatelessWidget {
   final Map<String, dynamic> app;
@@ -720,51 +515,52 @@ class _AppTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pid = app['pid'] as int? ?? -1;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(14),
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: const Color(0xFF050D08),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.15)),
         ),
         child: Row(children: [
-          _AppIcon(iconBase64: app['icon'] as String? ?? '', size: 48),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(
-                app['name'] as String? ?? '',
-                style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
-                    fontFamily: 'Cairo'),
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                app['package'] as String? ?? '',
-                style: TextStyle(
-                    color: const Color(0xFF00FF88).withOpacity(0.7),
-                    fontFamily: 'Courier',
-                    fontSize: 11),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ]),
-          ),
+          _AppIcon(iconBase64: app['icon'] as String? ?? '', size: 46),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(app['name'] as String? ?? '',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white, fontFamily: 'Cairo'),
+                overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 2),
+            Text(app['package'] as String? ?? '',
+                style: TextStyle(color: const Color(0xFF00FF88).withOpacity(0.7), fontFamily: 'Courier', fontSize: 10),
+                overflow: TextOverflow.ellipsis),
+          ])),
           const SizedBox(width: 8),
+          // PID badge
+          if (pid > 0)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF001A0A),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3)),
+              ),
+              child: Text('PID\n$pid',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Color(0xFF00FF88), fontFamily: 'Courier', fontSize: 9, height: 1.3)),
+            ),
+          const SizedBox(width: 6),
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: const Color(0xFF00FF88).withOpacity(0.1),
               borderRadius: BorderRadius.circular(10),
             ),
-            child: const Icon(Icons.bolt,
-                color: Color(0xFF00FF88), size: 20),
+            child: const Icon(Icons.bolt, color: Color(0xFF00FF88), size: 20),
           ),
         ]),
       ),
@@ -773,7 +569,7 @@ class _AppTile extends StatelessWidget {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// App Icon Widget (renders Base64 PNG or placeholder)
+// App Icon Widget
 // ────────────────────────────────────────────────────────────────────────────
 class _AppIcon extends StatelessWidget {
   final String iconBase64;
@@ -787,13 +583,8 @@ class _AppIcon extends StatelessWidget {
         final bytes = base64Decode(iconBase64);
         return ClipRRect(
           borderRadius: BorderRadius.circular(size * 0.22),
-          child: Image.memory(
-            Uint8List.fromList(bytes),
-            width: size,
-            height: size,
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => _placeholder(),
-          ),
+          child: Image.memory(Uint8List.fromList(bytes), width: size, height: size, fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => _placeholder()),
         );
       } catch (_) {}
     }
@@ -801,21 +592,15 @@ class _AppIcon extends StatelessWidget {
   }
 
   Widget _placeholder() => Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: const Color(0xFF001A0A),
-          borderRadius: BorderRadius.circular(size * 0.22),
-          border: Border.all(
-              color: const Color(0xFF00FF88).withOpacity(0.3)),
-        ),
-        child: Icon(Icons.android,
-            color: const Color(0xFF00FF88).withOpacity(0.6),
-            size: size * 0.55),
-      );
+    width: size, height: size,
+    decoration: BoxDecoration(
+      color: const Color(0xFF001A0A),
+      borderRadius: BorderRadius.circular(size * 0.22),
+      border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3)),
+    ),
+    child: Icon(Icons.android, color: const Color(0xFF00FF88).withOpacity(0.5), size: size * 0.55),
+  );
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Phase enum
 // ────────────────────────────────────────────────────────────────────────────
 enum _Phase { idle, loadingApps, running, done }
