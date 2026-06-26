@@ -45,7 +45,6 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
   List<String> _consoleLines = [];
   bool? _success;
   bool _isFridaMissing = false;
-  bool _isFridaMissing = false;
 
   late final AnimationController _glowCtrl;
   late final AnimationController _pulseCtrl;
@@ -162,7 +161,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
   }
 
   void _reset() => setState(() {
-    _phase = _Phase.idle; _selected = null; _consoleLines = []; _success = null; _isFridaMissing = false; _isFridaMissing = false;
+    _phase = _Phase.idle; _selected = null; _consoleLines = []; _success = null; _isFridaMissing = false;
   });
 
   void _showSnack(String msg) {
