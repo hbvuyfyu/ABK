@@ -44,6 +44,8 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
   Map<String, dynamic>? _selected;
   List<String> _consoleLines = [];
   bool? _success;
+  bool _isFridaMissing = false;
+  bool _isFridaMissing = false;
 
   late final AnimationController _glowCtrl;
   late final AnimationController _pulseCtrl;
@@ -160,7 +162,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
   }
 
   void _reset() => setState(() {
-    _phase = _Phase.idle; _selected = null; _consoleLines = []; _success = null;
+    _phase = _Phase.idle; _selected = null; _consoleLines = []; _success = null; _isFridaMissing = false; _isFridaMissing = false;
   });
 
   void _showSnack(String msg) {
@@ -428,7 +430,66 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
     ]);
   }
 
-  Widget _termDot(Color c) => Container(width: 12, height: 12, decoration: BoxDecoration(color: c, shape: BoxShape.circle));
+
+    // ── frida-inject not found ─────────────────────────────────────────────────
+    Widget _buildFridaMissingCard() {
+      return Container(
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A0000),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppTheme.error.withOpacity(0.6), width: 1.5),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: const [
+            Icon(Icons.warning_amber_rounded, color: Color(0xFFFFBD2E), size: 22),
+            SizedBox(width: 8),
+            Expanded(child: Text('frida-inject غير مثبّت على الجهاز',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold,
+                    color: Color(0xFFFFBD2E), fontFamily: 'Cairo'))),
+          ]),
+          const SizedBox(height: 10),
+          const Divider(color: Color(0xFF330000), height: 1),
+          const SizedBox(height: 10),
+          _fridaStep('1', 'حمّل frida-inject من GitHub',
+              'github.com/frida/frida/releases\n→ frida-inject-XX-android-x86 (محاكي)\n→ frida-inject-XX-android-arm64 (هاتف حقيقي)'),
+          _fridaStep('2', 'ارفعه للجهاز',
+              'adb push frida-inject /data/local/tmp/frida-inject'),
+          _fridaStep('3', 'أعطه صلاحية التنفيذ',
+              'adb shell su -c "chmod 755 /data/local/tmp/frida-inject"'),
+          _fridaStep('4', 'أعد المحاولة', ''),
+        ]),
+      );
+    }
+
+    Widget _fridaStep(String n, String title, String cmd) => Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(width: 22, height: 22,
+          decoration: BoxDecoration(shape: BoxShape.circle,
+            color: const Color(0xFFFFBD2E).withOpacity(0.15),
+            border: Border.all(color: const Color(0xFFFFBD2E).withOpacity(0.5))),
+          child: Center(child: Text(n, style: const TextStyle(
+              color: Color(0xFFFFBD2E), fontFamily: 'Courier', fontSize: 10, fontWeight: FontWeight.bold)))),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(title, style: const TextStyle(color: Colors.white, fontFamily: 'Cairo', fontSize: 12, fontWeight: FontWeight.w600)),
+          if (cmd.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(color: const Color(0xFF050D08), borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.2))),
+              child: Text(cmd, style: const TextStyle(
+                  color: Color(0xFF00FF88), fontFamily: 'Courier', fontSize: 10, height: 1.5)),
+            ),
+          ],
+        ])),
+      ]),
+    );
+
+    Widget _termDot(Color c) => Container(width: 12, height: 12, decoration: BoxDecoration(color: c, shape: BoxShape.circle));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
