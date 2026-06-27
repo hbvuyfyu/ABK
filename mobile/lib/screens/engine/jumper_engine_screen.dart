@@ -123,7 +123,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
       '[*] Copying script to /data/local/tmp/jumper_07.js',
       '[*] Connecting to Frida server on USB...',
       '[*] Attaching to process via PID $pid...',
-      '[*] Script loaded — waiting 4s for Java runtime...',
+      '[*] Script loaded — waiting for Java runtime...',
     ];
     for (final line in preLines) {
       await Future.delayed(const Duration(milliseconds: 350));
@@ -137,14 +137,22 @@ class _JumperEngineScreenState extends State<JumperEngineScreen>
 
       final success   = result['success'] as bool? ?? false;
       final rawOutput = result['output'] as String? ?? '';
+      final errorMsg  = result['error'] as String? ?? '';
 
-      // Stream real output lines with typing effect
+      // Show all output lines
       for (final line in rawOutput.split('\n')) {
         final trimmed = line.trim();
         if (trimmed.isEmpty) continue;
-        await Future.delayed(const Duration(milliseconds: 100));
+        await Future.delayed(const Duration(milliseconds: 80));
         if (!mounted) return;
         setState(() => _consoleLines.add(trimmed));
+      }
+
+      // Show error if any
+      if (errorMsg.isNotEmpty) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (!mounted) return;
+        setState(() => _consoleLines.add('[-] $errorMsg'));
       }
 
       await Future.delayed(const Duration(milliseconds: 400));
@@ -498,7 +506,7 @@ class _AppPickerSheet extends StatefulWidget {
   final List<Map<String, dynamic>> apps;
   final void Function(Map<String, dynamic>) onSelected;
   const _AppPickerSheet({required this.apps, required this.onSelected});
-  @override State<_AppPickerSheet> createState() => _AppPickerSheetState();
+  @override State<_AppPickerSheetState> createState() => _AppPickerSheetState();
 }
 
 class _AppPickerSheetState extends State<_AppPickerSheet> {

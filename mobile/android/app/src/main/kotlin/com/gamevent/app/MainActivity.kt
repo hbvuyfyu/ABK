@@ -148,15 +148,53 @@ class MainActivity : FlutterActivity() {
                     "output" to buildNotFoundMessage())
 
             // Build command — --runtime=v8 avoids ART/dex compilation permission issues
+            // --no-pause keeps the script alive and prevents stream close
             val cmd = when (mode) {
-                BinMode.INJECT_LOCAL  -> "$binary --pid=$targetPid --script=$scriptDest --runtime=v8 2>&1"
-                BinMode.INJECT_USB    -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 2>&1"
-                BinMode.FRIDA_LOCAL   -> "$binary -H 127.0.0.1:27042 --pid $targetPid -l $scriptDest --runtime=v8 2>&1"
-                BinMode.FRIDA_USB     -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 2>&1"
+                BinMode.INJECT_LOCAL  -> "$binary --pid=$targetPid --script=$scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.INJECT_USB    -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.FRIDA_LOCAL   -> "$binary -H 127.0.0.1:27042 --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.FRIDA_USB     -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
             }
 
-            val (out, _) = execSuOutput(cmd, 14)
-            val success  = out.contains("Event sent successfully") || out.contains("[+]")
+            // Increased timeout to 60 seconds for slower devices/emulators
+            val (out, exitCode) = execSuOutput(cmd, 60)
+
+            // Check for timeout
+            if (out.contains("TIMEOUT")) {
+                return mapOf(
+                    "success" to false,
+                    "output" to out,
+                    "error" to "Injection timed out. The app may be too slow to respond. Try again."
+                )
+            }
+
+            // Check for stream closed / connection errors
+            if (out.contains("Stream closed") || out.contains("closed") || out.contains("Connection")) {
+                return mapOf(
+                    "success" to false,
+                    "output" to out,
+                    "error" to "Frida stream closed. Try: (1) Restart frida-server, (2) Use frida-inject instead of frida CLI, (3) Check SELinux: setenforce 0"
+                )
+            }
+
+            // Check for success indicators including our script output
+            val success  = out.contains("Event sent successfully") ||
+                          out.contains("[+] Event sent") ||
+                          out.contains("[+] Java runtime ready") ||
+                          (out.contains("[+]") && out.contains("07-JUMPER"))
+
+            // If frida-inject failed with "Stream closed", try frida CLI as fallback
+            if (!success && (out.contains("Stream closed") || out.contains("unable to find process"))) {
+                val fallbackCmd = "frida -U -f $pkgName -l $scriptDest --runtime=v8 --no-pause 2>&1"
+                val (fallbackOut, _) = execSuOutput(fallbackCmd, 60)
+                val fallbackSuccess = fallbackOut.contains("Event sent successfully") ||
+                                     fallbackOut.contains("[+] Event sent") ||
+                                     fallbackOut.contains("[+] Java runtime ready")
+                if (fallbackSuccess) {
+                    return mapOf("success" to true, "output" to (out + "\n" + fallbackOut).trim())
+                }
+            }
+
             mapOf("success" to success, "output" to out.ifBlank { "[*] Script executed — no output." })
         } catch (e: Exception) {
             mapOf("success" to false, "output" to "[-] Exception: ${e.message}")
@@ -241,10 +279,13 @@ class MainActivity : FlutterActivity() {
         return try {
             val p         = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
             val completed = p.waitFor(timeoutSec, TimeUnit.SECONDS)
-            if (!completed) p.destroyForcibly()
+            if (!completed) {
+                p.destroyForcibly()
+                return Pair("[-] TIMEOUT: Command exceeded ${timeoutSec}s", -1)
+            }
             val stdout = p.inputStream.bufferedReader().readText()
             val stderr = p.errorStream.bufferedReader().readText()
-            Pair((stdout + stderr).trim(), if (completed) try { p.exitValue() } catch (_: Exception) { -1 } else -1)
+            Pair((stdout + stderr).trim(), try { p.exitValue() } catch (_: Exception) { -1 })
         } catch (e: Exception) {
             Pair("[-] ${e.message}", -1)
         }
@@ -254,26 +295,35 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private val JUMPER_SCRIPT = """
-setTimeout(function() {
+// Keep script alive and expose RPC to prevent stream close
+rpc.exports = {
+    ping: function() { return "alive"; }
+};
+
+function runJumper() {
+    console.log("[*] 07-JUMPER initialising...");
+    console.log("[*] Waiting for Java runtime...");
+
     Java.perform(function() {
-        console.log("\n[+] Starting injection 07-JuMper script");
-
-        var AppsFlyerLib = Java.use("com.appsflyer.AppsFlyerLib");
-
-        var HashMap = Java.use("java.util.HashMap");
-        var eventValues = HashMap.${'$'}new();
-        eventValues.put("af", "level");
-
-        var eventName = "power_5w";
-
-        var ActivityThread = Java.use("android.app.ActivityThread");
-        var context = ActivityThread.currentApplication().getApplicationContext();
-
-        console.log("[+] Calling AppsFlyer:");
-        console.log("  - Event Name: " + eventName);
-        console.log("  - Event Values: " + JSON.stringify({ af: "level" }));
+        console.log("[+] Java runtime ready!");
+        console.log("[+] Starting injection 07-JuMper script");
 
         try {
+            var AppsFlyerLib = Java.use("com.appsflyer.AppsFlyerLib");
+
+            var HashMap = Java.use("java.util.HashMap");
+            var eventValues = HashMap.\u0024new();
+            eventValues.put("af", "level");
+
+            var eventName = "power_5w";
+
+            var ActivityThread = Java.use("android.app.ActivityThread");
+            var context = ActivityThread.currentApplication().getApplicationContext();
+
+            console.log("[+] Calling AppsFlyer:");
+            console.log("  - Event Name: " + eventName);
+            console.log("  - Event Values: " + JSON.stringify({ af: "level" }));
+
             AppsFlyerLib.getInstance().logEvent(
                 context,
                 eventName,
@@ -281,12 +331,19 @@ setTimeout(function() {
             );
             console.log("[+] Event sent successfully!");
         } catch (e) {
-            console.log("[-] Error calling logEvent: " + e.message);
+            console.log("[-] Error: " + e.message);
+            console.log("[-] Stack: " + e.stack);
         }
     });
-}, 4000);
+}
 
-console.log("[*] 07-JUMPER ..");
+// Delay to ensure target app is fully initialised
+setTimeout(runJumper, 2000);
+
+// Keep process alive for 30 seconds to capture all output
+setTimeout(function() {
+    console.log("[*] Script timeout reached, exiting...");
+}, 30000);
 """.trimIndent()
     }
 }
