@@ -447,7 +447,7 @@ class _AppPickerSheet extends StatefulWidget {
   final List<Map<String, dynamic>> apps;
   final void Function(Map<String, dynamic>) onSelected;
   const _AppPickerSheet({required this.apps, required this.onSelected});
-  @override State<_AppPickerSheetState> createState() => _AppPickerSheetState();
+@override State<_AppPickerSheet> createState() => _AppPickerSheetState();
 }
 
 class _AppPickerSheetState extends State<_AppPickerSheet> {
