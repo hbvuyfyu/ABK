@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
+import android.provider.Settings
 import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -38,9 +39,128 @@ class MainActivity : FlutterActivity() {
                             runOnUiThread { result.success(output) }
                         }.start()
                     }
+                    "getDeviceIds" -> {
+                        val pkgName = call.argument<String>("packageName") ?: ""
+                        Thread {
+                            val ids = getDeviceIds(pkgName)
+                            runOnUiThread { result.success(ids) }
+                        }.start()
+                    }
+                    "getGaid" -> {
+                        Thread {
+                            val gaid = readGaid()
+                            runOnUiThread { result.success(gaid) }
+                        }.start()
+                    }
+                    "getAfUid" -> {
+                        val pkgName = call.argument<String>("packageName") ?: ""
+                        Thread {
+                            val afUid = readAfUid(pkgName)
+                            runOnUiThread { result.success(afUid) }
+                        }.start()
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    // ─── Device IDs (GAID + AF UID) ────────────────────────────────────────────
+
+    private fun getDeviceIds(pkgName: String): Map<String, String> {
+        val gaid  = readGaid()
+        val afUid = if (pkgName.isNotEmpty()) readAfUid(pkgName) else ""
+        return mapOf("gaid" to gaid, "afUid" to afUid)
+    }
+
+    /**
+     * Reads the Google Advertising ID from device settings.
+     * Works without root on Android 10+ via Settings.Secure.
+     * Falls back to root-based extraction on older devices.
+     */
+    private fun readGaid(): String {
+        // Method 1: Settings.Secure (works on most devices)
+        try {
+            val gaid = Settings.Secure.getString(contentResolver, "advertising_id")
+            if (!gaid.isNullOrEmpty() && gaid != "00000000-0000-0000-0000-000000000000") {
+                return gaid
+            }
+        } catch (_: Exception) {}
+
+        // Method 2: Via root — read from GMS shared prefs
+        try {
+            val paths = listOf(
+                "/data/data/com.google.android.gms/shared_prefs/adid_settings.xml",
+                "/data/data/com.google.android.gms/shared_prefs/Checkin.xml"
+            )
+            for (path in paths) {
+                val (out, _) = execSuOutput("cat '$path' 2>/dev/null", 5)
+                val match = Regex("""<string name="adid_key">([^<]+)</string>""").find(out)
+                    ?: Regex("""advertising_id[^>]*>([0-9a-f-]{36})""").find(out)
+                val id = match?.groupValues?.getOrNull(1)?.trim() ?: ""
+                if (id.length >= 36) return id
+            }
+        } catch (_: Exception) {}
+
+        // Method 3: gsfid via root
+        try {
+            val (out, _) = execSuOutput(
+                "content query --uri content://com.google.android.gsf.gservices/prefix --where \"name='android_id'\" 2>/dev/null | grep android_id",
+                5
+            )
+            val id = out.trim().substringAfterLast("=").trim()
+            if (id.isNotEmpty() && id != "null") return id
+        } catch (_: Exception) {}
+
+        return ""
+    }
+
+    /**
+     * Tries to extract the AppsFlyer UID from the target app's data directory.
+     * Requires root access. Reads appsflyer-data shared prefs file.
+     */
+    private fun readAfUid(pkgName: String): String {
+        if (pkgName.isEmpty()) return ""
+
+        val prefPaths = listOf(
+            "/data/data/$pkgName/shared_prefs/appsflyer-data.xml",
+            "/data/data/$pkgName/shared_prefs/appsflyer_data.xml",
+            "/data/data/$pkgName/shared_prefs/AppsFlyerLib.xml",
+            "/data/data/$pkgName/shared_prefs/com.appsflyer.OneLink.xml"
+        )
+
+        for (path in prefPaths) {
+            try {
+                val (out, _) = execSuOutput("cat '$path' 2>/dev/null", 5)
+                if (out.isBlank()) continue
+
+                // Try common key names for AF UID
+                val patterns = listOf(
+                    Regex("""<string name="appsflyer_id">([^<]+)</string>"""),
+                    Regex("""<string name="AF_ID">([^<]+)</string>"""),
+                    Regex("""<string name="appsflyer_device_id">([^<]+)</string>"""),
+                    Regex("""<string name="afuid">([^<]+)</string>"""),
+                    Regex("""([0-9]{10,13}-[0-9]{19,20})""")
+                )
+                for (pattern in patterns) {
+                    val match = pattern.find(out)
+                    val id = match?.groupValues?.getOrNull(1)?.trim() ?: ""
+                    if (id.isNotEmpty() && id.length > 5) return id
+                }
+            } catch (_: Exception) {}
+        }
+
+        // Fallback: search all shared prefs for appsflyer ID pattern
+        try {
+            val (out, _) = execSuOutput(
+                "grep -r 'appsflyer_id\\|AF_ID\\|afuid' /data/data/$pkgName/shared_prefs/ 2>/dev/null | head -5",
+                5
+            )
+            val match = Regex("""([0-9]{10,13}-[0-9]{14,20})""").find(out)
+            val id = match?.groupValues?.getOrNull(1)?.trim() ?: ""
+            if (id.isNotEmpty()) return id
+        } catch (_: Exception) {}
+
+        return ""
     }
 
     // ─── Running Apps ──────────────────────────────────────────────────────────
@@ -50,9 +170,8 @@ class MainActivity : FlutterActivity() {
         val apps     = mutableListOf<Map<String, Any>>()
         val seenPkgs = mutableSetOf<String>()
         val myPkg    = packageName
-        val pidMap   = mutableMapOf<String, Int>() // package -> pid
+        val pidMap   = mutableMapOf<String, Int>()
 
-        // 1. ActivityManager (gives real PIDs)
         try {
             val am    = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val procs = am.runningAppProcesses ?: emptyList()
@@ -63,7 +182,6 @@ class MainActivity : FlutterActivity() {
             }
         } catch (_: Exception) {}
 
-        // 2. Root ps -A fallback
         try {
             val (psOut, _) = execSuOutput("ps -A", 5)
             for (line in psOut.lines()) {
@@ -71,17 +189,13 @@ class MainActivity : FlutterActivity() {
                 if (parts.size < 2) continue
                 val pid      = parts[1].toIntOrNull() ?: continue
                 val procName = parts.last()
-                if (procName.contains('.') &&
-                    !procName.startsWith('/') &&
-                    !procName.startsWith('[')
-                ) {
+                if (procName.contains('.') && !procName.startsWith('/') && !procName.startsWith('[')) {
                     val pkg = procName.substringBefore(':')
                     if (!pidMap.containsKey(pkg)) pidMap[pkg] = pid
                 }
             }
         } catch (_: Exception) {}
 
-        // 3. Build entries
         for ((pkg, pid) in pidMap) {
             if (pkg == myPkg || pkg in seenPkgs) continue
             seenPkgs.add(pkg)
@@ -119,21 +233,18 @@ class MainActivity : FlutterActivity() {
 
     private fun runJumperScript(pid: Int, pkgName: String): Map<String, Any> {
         return try {
-            // Write script file
             val scriptFile = File(cacheDir, "jumper_07.js")
             scriptFile.writeText(JUMPER_SCRIPT)
             val scriptDest = "/data/local/tmp/jumper_07.js"
             execSuOutput("cp '${scriptFile.absolutePath}' $scriptDest && chmod 755 $scriptDest", 5)
             scriptFile.delete()
 
-            // Resolve PID if needed
             val targetPid = if (pid > 0) pid else resolvePid(pkgName)
             if (targetPid <= 0) {
                 return mapOf("success" to false,
                     "output" to "[-] لم يتم العثور على process لـ: $pkgName\n[*] تأكد أن التطبيق مفتوح.")
             }
 
-            // Fix frida OAT cache permissions (fixes "Permission denied" on emulators)
             execSuOutput(
                 "mkdir -p /data/local/tmp/oat/x86 /data/local/tmp/oat/x86_64 /data/local/tmp/oat/arm64 /data/local/tmp/oat/arm && " +
                 "chmod -R 777 /data/local/tmp/oat 2>/dev/null; " +
@@ -142,48 +253,33 @@ class MainActivity : FlutterActivity() {
                 5
             )
 
-            // Find a working frida binary
             val (binary, mode) = findFridaBinary()
-                ?: return mapOf("success" to false,
-                    "output" to buildNotFoundMessage())
+                ?: return mapOf("success" to false, "output" to buildNotFoundMessage())
 
-            // Build command — --runtime=v8 avoids ART/dex compilation permission issues
-            // --no-pause keeps the script alive and prevents stream close
             val cmd = when (mode) {
-                BinMode.INJECT_LOCAL  -> "$binary --pid=$targetPid --script=$scriptDest --runtime=v8 --no-pause 2>&1"
-                BinMode.INJECT_USB    -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
-                BinMode.FRIDA_LOCAL   -> "$binary -H 127.0.0.1:27042 --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
-                BinMode.FRIDA_USB     -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.INJECT_LOCAL -> "$binary --pid=$targetPid --script=$scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.INJECT_USB   -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.FRIDA_LOCAL  -> "$binary -H 127.0.0.1:27042 --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
+                BinMode.FRIDA_USB    -> "$binary -U --pid $targetPid -l $scriptDest --runtime=v8 --no-pause 2>&1"
             }
 
-            // Increased timeout to 60 seconds for slower devices/emulators
-            val (out, exitCode) = execSuOutput(cmd, 60)
+            val (out, _) = execSuOutput(cmd, 60)
 
-            // Check for timeout
             if (out.contains("TIMEOUT")) {
-                return mapOf(
-                    "success" to false,
-                    "output" to out,
-                    "error" to "Injection timed out. The app may be too slow to respond. Try again."
-                )
+                return mapOf("success" to false, "output" to out,
+                    "error" to "Injection timed out. Try again.")
             }
 
-            // Check for stream closed / connection errors
             if (out.contains("Stream closed") || out.contains("closed") || out.contains("Connection")) {
-                return mapOf(
-                    "success" to false,
-                    "output" to out,
-                    "error" to "Frida stream closed. Try: (1) Restart frida-server, (2) Use frida-inject instead of frida CLI, (3) Check SELinux: setenforce 0"
-                )
+                return mapOf("success" to false, "output" to out,
+                    "error" to "Frida stream closed. Restart frida-server and try again.")
             }
 
-            // Check for success indicators including our script output
-            val success  = out.contains("Event sent successfully") ||
+            val success = out.contains("Event sent successfully") ||
                           out.contains("[+] Event sent") ||
                           out.contains("[+] Java runtime ready") ||
                           (out.contains("[+]") && out.contains("07-JUMPER"))
 
-            // If frida-inject failed with "Stream closed", try frida CLI as fallback
             if (!success && (out.contains("Stream closed") || out.contains("unable to find process"))) {
                 val fallbackCmd = "frida -U -f $pkgName -l $scriptDest --runtime=v8 --no-pause 2>&1"
                 val (fallbackOut, _) = execSuOutput(fallbackCmd, 60)
@@ -201,16 +297,9 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ─── Binary Detection ──────────────────────────────────────────────────────
-
     private enum class BinMode { INJECT_LOCAL, INJECT_USB, FRIDA_LOCAL, FRIDA_USB }
 
-    /**
-     * Searches common locations for frida-inject or frida binaries.
-     * Priority: frida-inject (device-side) > frida -H localhost > frida -U
-     */
     private fun findFridaBinary(): Pair<String, BinMode>? {
-        // First: find frida binaries anywhere on device
         val (findOut, _) = execSuOutput(
             "find /data/local/tmp /system/bin /system/xbin /data/adb " +
             "/sbin /vendor/bin /magisk -maxdepth 4 -name 'frida*' -type f 2>/dev/null",
@@ -218,19 +307,17 @@ class MainActivity : FlutterActivity() {
         )
         val foundPaths = findOut.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-        // Also add PATH-resolved candidates
         val candidates = mutableListOf<Pair<String, BinMode>>()
         for (path in foundPaths) {
             when {
                 path.contains("frida-inject") -> candidates.add(path to BinMode.INJECT_LOCAL)
-                path.contains("frida-server") -> { /* skip server binary */ }
+                path.contains("frida-server") -> { }
                 else -> {
                     candidates.add(path to BinMode.FRIDA_LOCAL)
                     candidates.add(path to BinMode.FRIDA_USB)
                 }
             }
         }
-        // Add well-known names via PATH
         candidates.addAll(listOf(
             "frida-inject" to BinMode.INJECT_LOCAL,
             "frida"        to BinMode.FRIDA_LOCAL,
@@ -238,34 +325,20 @@ class MainActivity : FlutterActivity() {
         ))
 
         for ((bin, mode) in candidates) {
-            val testCmd = when (mode) {
-                BinMode.INJECT_LOCAL -> "$bin --version 2>&1"
-                BinMode.INJECT_USB   -> "$bin --version 2>&1"
-                BinMode.FRIDA_LOCAL  -> "$bin --version 2>&1"
-                BinMode.FRIDA_USB    -> "$bin --version 2>&1"
-            }
-            val (out, code) = execSuOutput(testCmd, 3)
-            if (code == 0 || out.contains("frida", ignoreCase = true)) {
-                return bin to mode
-            }
+            val (out, code) = execSuOutput("$bin --version 2>&1", 3)
+            if (code == 0 || out.contains("frida", ignoreCase = true)) return bin to mode
         }
         return null
     }
 
     private fun buildNotFoundMessage(): String = """
 [-] frida binary not found on this device.
-
-[!] frida-server is running but you also need frida-inject.
-
 [*] Fix: download frida-inject for your device arch and push it:
-
   1. Go to: https://github.com/frida/frida/releases
-  2. Download: frida-inject-XX-android-arm64  (or x86 for emulator)
-  3. Push to device:
+  2. Download: frida-inject-XX-android-arm64
+  3. Push:
        adb push frida-inject /data/local/tmp/frida-inject
        adb shell su -c "chmod 755 /data/local/tmp/frida-inject"
-
-[*] Then restart the app and try again.
 """.trimIndent()
 
     private fun resolvePid(pkgName: String): Int {
@@ -291,11 +364,8 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ─── Embedded Script ───────────────────────────────────────────────────────
-
     companion object {
         private val JUMPER_SCRIPT = """
-// Keep script alive and expose RPC to prevent stream close
 rpc.exports = {
     ping: function() { return "alive"; }
 };
@@ -310,25 +380,15 @@ function runJumper() {
 
         try {
             var AppsFlyerLib = Java.use("com.appsflyer.AppsFlyerLib");
-
             var HashMap = Java.use("java.util.HashMap");
-            var eventValues = HashMap.\u0024new();
+            var eventValues = HashMap.${"$"}new();
             eventValues.put("af", "level");
-
             var eventName = "power_5w";
-
             var ActivityThread = Java.use("android.app.ActivityThread");
             var context = ActivityThread.currentApplication().getApplicationContext();
-
             console.log("[+] Calling AppsFlyer:");
             console.log("  - Event Name: " + eventName);
-            console.log("  - Event Values: " + JSON.stringify({ af: "level" }));
-
-            AppsFlyerLib.getInstance().logEvent(
-                context,
-                eventName,
-                eventValues
-            );
+            AppsFlyerLib.getInstance().logEvent(context, eventName, eventValues);
             console.log("[+] Event sent successfully!");
         } catch (e) {
             console.log("[-] Error: " + e.message);
@@ -337,10 +397,7 @@ function runJumper() {
     });
 }
 
-// Delay to ensure target app is fully initialised
 setTimeout(runJumper, 2000);
-
-// Keep process alive for 30 seconds to capture all output
 setTimeout(function() {
     console.log("[*] Script timeout reached, exiting...");
 }, 30000);
