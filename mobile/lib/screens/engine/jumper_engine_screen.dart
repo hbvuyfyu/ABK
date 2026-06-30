@@ -771,7 +771,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
         labelText: label,
         labelStyle: const TextStyle(color: AppTheme.textSecondary, fontSize: 12, fontFamily: 'Cairo'),
         filled: true,
-        fillColor: AppTheme.bg,
+        fillColor: AppTheme.surface,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppTheme.border)),
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppTheme.border)),
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppTheme.primary)),
@@ -791,7 +791,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
         decoration: BoxDecoration(
-          color: selected ? AppTheme.primary.withOpacity(0.14) : AppTheme.bg,
+          color: selected ? AppTheme.primary.withOpacity(0.14) : AppTheme.surface,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: selected ? AppTheme.primary : AppTheme.border,
@@ -826,7 +826,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
         margin: const EdgeInsets.only(bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
         decoration: BoxDecoration(
-          color: _customLevel ? AppTheme.accent.withOpacity(0.12) : AppTheme.bg,
+          color: _customLevel ? AppTheme.accent.withOpacity(0.12) : AppTheme.surface,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: _customLevel ? AppTheme.accent : AppTheme.border,
@@ -858,7 +858,7 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
                 hintText: 'مثال: 5',
                 hintStyle: const TextStyle(color: AppTheme.textHint, fontSize: 16),
                 filled: true,
-                fillColor: AppTheme.bg,
+                fillColor: AppTheme.surface,
                 border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(10),
                     borderSide: const BorderSide(color: AppTheme.accent)),
@@ -1053,7 +1053,7 @@ class _AppPickerSheetState extends State<_AppPickerSheet> {
               hintStyle: const TextStyle(color: AppTheme.textHint, fontFamily: 'Cairo'),
               prefixIcon: const Icon(Icons.search, color: AppTheme.textHint, size: 18),
               filled: true,
-              fillColor: AppTheme.bg,
+              fillColor: AppTheme.surface,
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.border)),
               enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.border)),
               focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.primary)),
