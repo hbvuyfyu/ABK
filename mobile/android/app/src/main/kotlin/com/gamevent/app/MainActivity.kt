@@ -25,12 +25,23 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+
+                    // ── NEW: all installed non-system apps (main entry point) ──
+                    "getInstalledApps" -> {
+                        Thread {
+                            val apps = getInstalledApps()
+                            runOnUiThread { result.success(apps) }
+                        }.start()
+                    }
+
+                    // ── Running apps (kept for backward compat) ────────────────
                     "getRunningApps" -> {
                         Thread {
                             val apps = getRunningApps()
                             runOnUiThread { result.success(apps) }
                         }.start()
                     }
+
                     "runJumper" -> {
                         val pid     = call.argument<Int>("pid") ?: -1
                         val pkgName = call.argument<String>("packageName") ?: ""
@@ -39,6 +50,7 @@ class MainActivity : FlutterActivity() {
                             runOnUiThread { result.success(output) }
                         }.start()
                     }
+
                     "getDeviceIds" -> {
                         val pkgName = call.argument<String>("packageName") ?: ""
                         Thread {
@@ -46,12 +58,14 @@ class MainActivity : FlutterActivity() {
                             runOnUiThread { result.success(ids) }
                         }.start()
                     }
+
                     "getGaid" -> {
                         Thread {
                             val gaid = readGaid()
                             runOnUiThread { result.success(gaid) }
                         }.start()
                     }
+
                     "getAfUid" -> {
                         val pkgName = call.argument<String>("packageName") ?: ""
                         Thread {
@@ -59,9 +73,82 @@ class MainActivity : FlutterActivity() {
                             runOnUiThread { result.success(afUid) }
                         }.start()
                     }
+
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    // ─── Installed Apps (no root needed) ───────────────────────────────────────
+
+    /**
+     * Returns all installed, launchable, non-system applications.
+     * Uses PackageManager — no root required.
+     * Returns maps with keys: package, label, icon (Base64 PNG).
+     */
+    private fun getInstalledApps(): List<Map<String, Any>> {
+        val pm   = packageManager
+        val myPkg = packageName
+        val apps = mutableListOf<Map<String, Any>>()
+
+        val installedPackages = try {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        } catch (_: Exception) { emptyList() }
+
+        for (info in installedPackages) {
+            val pkg = info.packageName
+            if (pkg == myPkg) continue                      // skip self
+            if (pm.getLaunchIntentForPackage(pkg) == null) continue  // not launchable
+            val isSystem = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                           (info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
+            if (isSystem) continue                          // skip pure system apps
+
+            try {
+                val label  = pm.getApplicationLabel(info).toString()
+                val icon   = try { pm.getApplicationIcon(pkg) } catch (_: Exception) { null }
+                val iconB64 = if (icon != null) drawableToBase64(icon) else ""
+                apps.add(mapOf("package" to pkg, "label" to label, "icon" to iconB64))
+            } catch (_: Exception) {}
+        }
+
+        // Also pull any currently-running apps that may be missing (root optional)
+        try {
+            val runningPkgs = getRunningPackages()
+            val existing    = apps.map { it["package"] as String }.toSet()
+            for (pkg in runningPkgs) {
+                if (pkg in existing || pkg == myPkg) continue
+                try {
+                    val info  = pm.getApplicationInfo(pkg, 0)
+                    val label = pm.getApplicationLabel(info).toString()
+                    apps.add(mapOf("package" to pkg, "label" to label, "icon" to ""))
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+
+        return apps.sortedBy { (it["label"] as String).lowercase() }
+    }
+
+    /** Collects package names of currently running processes (best-effort). */
+    private fun getRunningPackages(): Set<String> {
+        val pkgs = mutableSetOf<String>()
+        try {
+            val am    = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val procs = am.runningAppProcesses ?: emptyList()
+            for (proc in procs) {
+                proc.pkgList?.forEach { pkgs.add(it) }
+            }
+        } catch (_: Exception) {}
+        try {
+            val (psOut, _) = execSuOutput("ps -A 2>/dev/null", 5)
+            for (line in psOut.lines()) {
+                val parts    = line.trim().split(Regex("\\s+"))
+                val procName = parts.lastOrNull() ?: continue
+                if (procName.contains('.') && !procName.startsWith('/') && !procName.startsWith('[')) {
+                    pkgs.add(procName.substringBefore(':'))
+                }
+            }
+        } catch (_: Exception) {}
+        return pkgs
     }
 
     // ─── Device IDs (GAID + AF UID) ────────────────────────────────────────────
@@ -132,8 +219,6 @@ class MainActivity : FlutterActivity() {
             try {
                 val (out, _) = execSuOutput("cat '$path' 2>/dev/null", 5)
                 if (out.isBlank()) continue
-
-                // Try common key names for AF UID
                 val patterns = listOf(
                     Regex("""<string name="appsflyer_id">([^<]+)</string>"""),
                     Regex("""<string name="AF_ID">([^<]+)</string>"""),
@@ -143,27 +228,26 @@ class MainActivity : FlutterActivity() {
                 )
                 for (pattern in patterns) {
                     val match = pattern.find(out)
-                    val id = match?.groupValues?.getOrNull(1)?.trim() ?: ""
+                    val id    = match?.groupValues?.getOrNull(1)?.trim() ?: ""
                     if (id.isNotEmpty() && id.length > 5) return id
                 }
             } catch (_: Exception) {}
         }
 
-        // Fallback: search all shared prefs for appsflyer ID pattern
         try {
             val (out, _) = execSuOutput(
                 "grep -r 'appsflyer_id\\|AF_ID\\|afuid' /data/data/$pkgName/shared_prefs/ 2>/dev/null | head -5",
                 5
             )
             val match = Regex("""([0-9]{10,13}-[0-9]{14,20})""").find(out)
-            val id = match?.groupValues?.getOrNull(1)?.trim() ?: ""
+            val id    = match?.groupValues?.getOrNull(1)?.trim() ?: ""
             if (id.isNotEmpty()) return id
         } catch (_: Exception) {}
 
         return ""
     }
 
-    // ─── Running Apps ──────────────────────────────────────────────────────────
+    // ─── Running Apps (legacy) ─────────────────────────────────────────────────
 
     private fun getRunningApps(): List<Map<String, Any>> {
         val pm       = packageManager
@@ -185,7 +269,7 @@ class MainActivity : FlutterActivity() {
         try {
             val (psOut, _) = execSuOutput("ps -A", 5)
             for (line in psOut.lines()) {
-                val parts = line.trim().split(Regex("\\s+"))
+                val parts    = line.trim().split(Regex("\\s+"))
                 if (parts.size < 2) continue
                 val pid      = parts[1].toIntOrNull() ?: continue
                 val procName = parts.last()
@@ -199,13 +283,13 @@ class MainActivity : FlutterActivity() {
         for ((pkg, pid) in pidMap) {
             if (pkg == myPkg || pkg in seenPkgs) continue
             seenPkgs.add(pkg)
-            buildAppEntry(pm, pkg, pid)?.let { apps.add(it) }
+            buildRunningAppEntry(pm, pkg, pid)?.let { apps.add(it) }
         }
 
         return apps.sortedBy { it["name"] as String }
     }
 
-    private fun buildAppEntry(pm: PackageManager, pkg: String, pid: Int): Map<String, Any>? {
+    private fun buildRunningAppEntry(pm: PackageManager, pkg: String, pid: Int): Map<String, Any>? {
         return try {
             val info = pm.getApplicationInfo(pkg, 0)
             if (info.flags and ApplicationInfo.FLAG_SYSTEM != 0 &&
@@ -213,19 +297,19 @@ class MainActivity : FlutterActivity() {
             val name    = pm.getApplicationLabel(info).toString()
             val icon    = try { pm.getApplicationIcon(pkg) } catch (_: Exception) { null }
             val iconB64 = if (icon != null) drawableToBase64(icon) else ""
-            mapOf("package" to pkg, "name" to name, "icon" to iconB64, "pid" to pid, "importance" to 100)
+            mapOf("package" to pkg, "name" to name, "label" to name, "icon" to iconB64, "pid" to pid)
         } catch (_: Exception) { null }
     }
 
     private fun drawableToBase64(drawable: Drawable): String {
-        val w      = drawable.intrinsicWidth.coerceIn(1, 192)
-        val h      = drawable.intrinsicHeight.coerceIn(1, 192)
+        val w      = drawable.intrinsicWidth.coerceIn(1, 96)
+        val h      = drawable.intrinsicHeight.coerceIn(1, 96)
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         drawable.setBounds(0, 0, w, h)
         drawable.draw(canvas)
         val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 70, out)
+        bitmap.compress(Bitmap.CompressFormat.PNG, 60, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
@@ -266,30 +350,13 @@ class MainActivity : FlutterActivity() {
             val (out, _) = execSuOutput(cmd, 60)
 
             if (out.contains("TIMEOUT")) {
-                return mapOf("success" to false, "output" to out,
-                    "error" to "Injection timed out. Try again.")
-            }
-
-            if (out.contains("Stream closed") || out.contains("closed") || out.contains("Connection")) {
-                return mapOf("success" to false, "output" to out,
-                    "error" to "Frida stream closed. Restart frida-server and try again.")
+                return mapOf("success" to false, "output" to out, "error" to "Injection timed out.")
             }
 
             val success = out.contains("Event sent successfully") ||
                           out.contains("[+] Event sent") ||
                           out.contains("[+] Java runtime ready") ||
                           (out.contains("[+]") && out.contains("07-JUMPER"))
-
-            if (!success && (out.contains("Stream closed") || out.contains("unable to find process"))) {
-                val fallbackCmd = "frida -U -f $pkgName -l $scriptDest --runtime=v8 --no-pause 2>&1"
-                val (fallbackOut, _) = execSuOutput(fallbackCmd, 60)
-                val fallbackSuccess = fallbackOut.contains("Event sent successfully") ||
-                                     fallbackOut.contains("[+] Event sent") ||
-                                     fallbackOut.contains("[+] Java runtime ready")
-                if (fallbackSuccess) {
-                    return mapOf("success" to true, "output" to (out + "\n" + fallbackOut).trim())
-                }
-            }
 
             mapOf("success" to success, "output" to out.ifBlank { "[*] Script executed — no output." })
         } catch (e: Exception) {
@@ -306,7 +373,6 @@ class MainActivity : FlutterActivity() {
             6
         )
         val foundPaths = findOut.lines().map { it.trim() }.filter { it.isNotEmpty() }
-
         val candidates = mutableListOf<Pair<String, BinMode>>()
         for (path in foundPaths) {
             when {
@@ -323,7 +389,6 @@ class MainActivity : FlutterActivity() {
             "frida"        to BinMode.FRIDA_LOCAL,
             "frida"        to BinMode.FRIDA_USB,
         ))
-
         for ((bin, mode) in candidates) {
             val (out, code) = execSuOutput("$bin --version 2>&1", 3)
             if (code == 0 || out.contains("frida", ignoreCase = true)) return bin to mode
