@@ -4,18 +4,21 @@ import 'package:flutter/services.dart';
 import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 
-// ── Phase state machine ───────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Phases
+// ─────────────────────────────────────────────────────────────────────────────
 enum _Phase {
-  idle,
-  loadingApps,
-  detecting,
-  pickEvent,
-  pickSchedule,
-  extractingIds,
-  running,
-  done,
+  idle,         // start screen
+  loadingApps,  // fetching running apps from native
+  detecting,    // detect game + extract device IDs (parallel)
+  pickEvent,    // user picks event / custom level
+  sending,      // HTTP send in progress
+  done,         // result shown
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Widget
+// ─────────────────────────────────────────────────────────────────────────────
 class JumperEngineScreen extends StatefulWidget {
   const JumperEngineScreen({super.key});
   @override
@@ -23,62 +26,63 @@ class JumperEngineScreen extends StatefulWidget {
 }
 
 class _JumperEngineScreenState extends State<JumperEngineScreen> {
-  static const _channel = MethodChannel('com.gamevent.app/jumper');
+  static const _ch = MethodChannel('com.gamevent.app/jumper');
 
-  // ── State ──────────────────────────────────────────────────────────────────
+  // ── state ───────────────────────────────────────────────────────────────────
   _Phase _phase = _Phase.idle;
   final List<String> _log = [];
 
-  List<Map<String, dynamic>> _installedApps = [];
+  // detected game info
+  Map<String, dynamic>? _game;
+  String? _platform;
+  List<Map<String, dynamic>> _events = [];
 
-  Map<String, dynamic>? _detectedGame;
-  String? _detectedPlatform;
-
-  Map<String, dynamic>? _dailyUsage;
-
-  List<Map<String, dynamic>> _gameEvents = [];
-  Map<String, dynamic>? _selectedEvent;
-  bool _useCustomEvent = false;
-  final _customEventCtrl      = TextEditingController();
-  final _customEventTokenCtrl = TextEditingController();
-
-  bool _scheduleEnabled  = false;
-  int  _scheduleCount    = 5;
-  int  _scheduleInterval = 10;
-
+  // device IDs
   String _gaid  = '';
   String _afUid = '';
-  int    _runSent  = 0;
-  int    _runTotal = 0;
-  Timer? _countdownTimer;
-  int    _countdownSeconds = 0;
-  bool   _cancelled = false;
-  String _resultBanner = '';
-  bool   _resultOk     = false;
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  // manual overrides (shown when extraction fails)
+  final _gaidCtrl  = TextEditingController();
+  final _afUidCtrl = TextEditingController();
+  bool _showManualGaid  = false;
+  bool _showManualAfUid = false;
+
+  // event selection
+  Map<String, dynamic>? _selectedEvent;
+  bool _customLevel        = false;
+  final _customLevelCtrl   = TextEditingController();
+
+  // result
+  bool   _resultOk     = false;
+  String _resultMsg    = '';
+  int?   _resultHttp;
+
+  // daily usage
+  Map<String, dynamic>? _dailyUsage;
+
+  // ── lifecycle ───────────────────────────────────────────────────────────────
   @override
-  void initState() { super.initState(); _loadDailyUsage(); }
+  void initState() {
+    super.initState();
+    _loadDailyUsage();
+  }
 
   @override
   void dispose() {
-    _countdownTimer?.cancel();
-    _customEventCtrl.dispose();
-    _customEventTokenCtrl.dispose();
+    _gaidCtrl.dispose();
+    _afUidCtrl.dispose();
+    _customLevelCtrl.dispose();
     super.dispose();
   }
 
-  void _addLog(String line) {
+  // ── helpers ─────────────────────────────────────────────────────────────────
+  void _log$(String msg) {
     if (!mounted) return;
-    setState(() => _log.add('[${_hhmm()}] $line'));
+    final t = DateTime.now();
+    final ts = '${t.hour.toString().padLeft(2,'0')}:${t.minute.toString().padLeft(2,'0')}:${t.second.toString().padLeft(2,'0')}';
+    setState(() => _log.add('[$ts] $msg'));
   }
 
-  String _hhmm() {
-    final n = DateTime.now();
-    return '${n.hour.toString().padLeft(2,'0')}:${n.minute.toString().padLeft(2,'0')}:${n.second.toString().padLeft(2,'0')}';
-  }
-
-  // ── Daily usage ────────────────────────────────────────────────────────────
   Future<void> _loadDailyUsage() async {
     try {
       final res = await ApiService.get('/games/daily-usage');
@@ -88,166 +92,194 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
     } catch (_) {}
   }
 
-  // ── Step 1: Load installed apps ────────────────────────────────────────────
-  Future<void> _startDetection() async {
-    setState(() { _phase = _Phase.loadingApps; _log.clear(); _cancelled = false; });
-    _addLog('🔍 جاري تحميل قائمة التطبيقات...');
+  void _reset() {
+    if (!mounted) return;
+    setState(() {
+      _phase           = _Phase.idle;
+      _log.clear();
+      _game            = null;
+      _platform        = null;
+      _events          = [];
+      _gaid            = '';
+      _afUid           = '';
+      _showManualGaid  = false;
+      _showManualAfUid = false;
+      _selectedEvent   = null;
+      _customLevel     = false;
+      _resultOk        = false;
+      _resultMsg       = '';
+      _resultHttp      = null;
+    });
+    _loadDailyUsage();
+  }
+
+  // ── STEP 1: load running apps ────────────────────────────────────────────────
+  Future<void> _startFlow() async {
+    setState(() { _phase = _Phase.loadingApps; _log.clear(); });
+    _log$('🔍 جاري تحميل التطبيقات المفتوحة...');
 
     try {
-      final raw = await _channel.invokeMethod<List>('getInstalledApps') ?? [];
-      final apps = raw.map<Map<String, dynamic>>((a) => Map<String, dynamic>.from(a as Map)).toList();
+      final raw  = await _ch.invokeMethod<List>('getRunningApps') ?? [];
+      final apps = raw
+          .map<Map<String, dynamic>>((a) => Map<String, dynamic>.from(a as Map))
+          .where((a) => (a['name'] ?? a['label'] ?? '').toString().isNotEmpty)
+          .toList()
+        ..sort((a, b) => (a['name'] ?? a['label'] ?? '').toString().toLowerCase()
+            .compareTo((b['name'] ?? b['label'] ?? '').toString().toLowerCase()));
+
+      if (!mounted) return;
 
       if (apps.isEmpty) {
-        _addLog('⚠️ لم يتم العثور على تطبيقات');
+        _log$('⚠️ لا توجد تطبيقات مفتوحة حالياً');
         setState(() => _phase = _Phase.idle);
         return;
       }
 
-      setState(() => _installedApps = apps);
-      _addLog('✅ تم العثور على ${apps.length} تطبيق');
-      _showAppPicker();
+      _log$('✅ ${apps.length} تطبيق مفتوح');
+      _showAppPicker(apps);
     } catch (e) {
-      _addLog('❌ خطأ: $e');
-      setState(() => _phase = _Phase.idle);
+      _log$('❌ خطأ: $e');
+      if (mounted) setState(() => _phase = _Phase.idle);
     }
   }
 
-  // ── App picker bottom sheet ────────────────────────────────────────────────
-  void _showAppPicker() {
+  // ── app picker bottom sheet ──────────────────────────────────────────────────
+  void _showAppPicker(List<Map<String, dynamic>> apps) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppTheme.cardBg,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.6, maxChildSize: 0.92, minChildSize: 0.4, expand: false,
-        builder: (_, scroll) => Column(children: [
-          const SizedBox(height: 12),
-          Container(width: 40, height: 4, decoration: BoxDecoration(color: AppTheme.border, borderRadius: BorderRadius.circular(2))),
-          const SizedBox(height: 14),
-          const Text('اختر التطبيق', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
-          const Divider(color: AppTheme.border, height: 20),
-          Expanded(child: ListView.builder(
-            controller: scroll,
-            itemCount: _installedApps.length,
-            itemBuilder: (_, i) {
-              final app = _installedApps[i];
-              return ListTile(
-                leading: Container(
-                  width: 40, height: 40,
-                  decoration: BoxDecoration(color: AppTheme.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
-                  child: const Icon(Icons.gamepad_outlined, color: AppTheme.primary, size: 22),
-                ),
-                title: Text(app['label'] ?? app['package'] ?? '', style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textPrimary, fontSize: 14)),
-                subtitle: Text(app['package'] ?? '', style: const TextStyle(color: AppTheme.textHint, fontSize: 10, fontFamily: 'monospace')),
-                onTap: () { Navigator.pop(context); _detectGame(app['package'] ?? ''); },
-              );
-            },
-          )),
-        ]),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-    ).whenComplete(() {
-      if (_phase == _Phase.loadingApps && mounted) setState(() => _phase = _Phase.idle);
-    });
-  }
-
-  // ── Step 3: Detect ─────────────────────────────────────────────────────────
-  Future<void> _detectGame(String pkg) async {
-    setState(() => _phase = _Phase.detecting);
-    _addLog('🎮 فحص "$pkg"...');
-
-    try {
-      final res = await ApiService.get('/games/detect?package=${Uri.encodeComponent(pkg)}', auth: false);
-      if (res['found'] == true) {
-        final game   = res['game'] as Map<String, dynamic>;
-        final events = (game['events'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-        _addLog('✅ تم الكشف: ${game['displayName']} [${res['platform']}]');
-        _addLog('📋 أحداث متاحة: ${events.length}');
-        if (!mounted) return;
-        setState(() {
-          _detectedGame    = game;
-          _detectedPlatform = res['platform'] as String?;
-          _gameEvents      = events;
-          _selectedEvent   = events.isNotEmpty ? events.first : null;
-          _useCustomEvent  = false;
-          _phase           = _Phase.pickEvent;
-        });
-      } else {
-        _addLog('⚠️ هذه اللعبة غير مدعومة');
-        setState(() => _phase = _Phase.idle);
-      }
-    } catch (e) {
-      _addLog('❌ خطأ اتصال: $e');
-      setState(() => _phase = _Phase.idle);
-    }
-  }
-
-  // ── Step 5: Extract IDs ────────────────────────────────────────────────────
-  Future<void> _startExtractionAndSend() async {
-    setState(() { _phase = _Phase.extractingIds; _runSent = 0; _runTotal = _scheduleEnabled ? _scheduleCount : 1; });
-    _addLog('📡 استخراج معرفات الجهاز...');
-
-    try {
-      final ids = await _channel.invokeMethod<Map>('getDeviceIds') ?? {};
-      _gaid  = ids['gaid']?.toString()  ?? '';
-      _afUid = ids['afUid']?.toString() ?? '';
-
-      if (_gaid.isEmpty) {
-        _addLog('⚠️ فشل الحصول على GAID — تأكد من صلاحيات الجذر');
+      builder: (_) => _AppPickerSheet(apps: apps),
+    ).then((picked) {
+      if (!mounted) return;
+      if (picked == null) {
         setState(() => _phase = _Phase.idle);
         return;
       }
-      _addLog('✅ GAID: ${_gaid.substring(0, _gaid.length.clamp(0, 8))}...');
-      if (_afUid.isNotEmpty) _addLog('✅ AF UID: ${_afUid.substring(0, _afUid.length.clamp(0, 8))}...');
-
-      setState(() => _phase = _Phase.running);
-      await _sendNext();
-    } catch (e) {
-      _addLog('❌ خطأ استخراج IDs: $e');
-      setState(() => _phase = _Phase.idle);
-    }
-  }
-
-  // ── Send cycle ─────────────────────────────────────────────────────────────
-  Future<void> _sendNext() async {
-    if (_cancelled || !mounted) return;
-    _addLog('🚀 إرسال الحدث (${_runSent + 1}/$_runTotal)...');
-    final ok = await _doSendEvent();
-
-    if (ok && mounted) { setState(() => _runSent++); await _loadDailyUsage(); }
-
-    if (_cancelled || !ok || _runSent >= _runTotal) { _finishRun(ok); return; }
-
-    final delaySecs = _scheduleInterval * 60;
-    _addLog('⏳ الإرسال التالي بعد $_scheduleInterval دقيقة...');
-    if (!mounted) return;
-    setState(() => _countdownSeconds = delaySecs);
-
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted || _cancelled) { t.cancel(); return; }
-      setState(() { _countdownSeconds--; });
-      if (_countdownSeconds <= 0) { t.cancel(); _sendNext(); }
+      _onAppPicked(picked as Map<String, dynamic>);
     });
   }
 
-  Future<bool> _doSendEvent() async {
-    final game     = _detectedGame!;
-    final platform = _detectedPlatform!;
+  // ── STEP 2: detect + extract IDs (parallel) ──────────────────────────────────
+  Future<void> _onAppPicked(Map<String, dynamic> app) async {
+    final pkg = app['package'] as String? ?? '';
+    setState(() => _phase = _Phase.detecting);
+    _log$('🎮 اخترت: ${app['name'] ?? app['label'] ?? pkg}');
+    _log$('📦 Package: $pkg');
+
+    // run both in parallel
+    final results = await Future.wait([
+      _detectGame(pkg),
+      _extractIds(pkg),
+    ]);
+
+    final detected = results[0] as Map<String, dynamic>?;
+    if (!mounted) return;
+
+    if (detected == null) {
+      setState(() => _phase = _Phase.idle);
+      return;
+    }
+
+    _game     = detected['game']     as Map<String, dynamic>?;
+    _platform = detected['platform'] as String?;
+    _events   = (detected['events'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    _selectedEvent = _events.isNotEmpty ? _events.first : null;
+    _customLevel   = false;
+
+    // IDs already set in _extractIds side-effects
+    _showManualGaid  = _gaid.isEmpty;
+    _showManualAfUid = _afUid.isEmpty && (_platform == 'af' || _platform == 'singular');
+
+    setState(() => _phase = _Phase.pickEvent);
+  }
+
+  Future<Map<String, dynamic>?> _detectGame(String pkg) async {
+    try {
+      _log$('🔎 كشف المنصة من قاعدة البيانات...');
+      final res = await ApiService.get('/games/detect?package=${Uri.encodeComponent(pkg)}', auth: false);
+      if (res['found'] == true) {
+        final platform = res['platform'] as String?;
+        final game     = res['game']     as Map<String, dynamic>?;
+        final events   = (game?['events'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+        _log$('✅ اللعبة: ${game?['displayName']} [${_platformLabel(platform)}]');
+        _log$('📋 ${events.length} حدث متاح');
+        return {'platform': platform, 'game': game, 'events': events};
+      } else {
+        _log$('⚠️ هذه اللعبة غير مدعومة في قاعدة البيانات');
+        if (mounted) setState(() => _phase = _Phase.idle);
+        return null;
+      }
+    } catch (e) {
+      _log$('❌ خطأ اتصال: $e');
+      if (mounted) setState(() => _phase = _Phase.idle);
+      return null;
+    }
+  }
+
+  Future<void> _extractIds(String pkg) async {
+    try {
+      _log$('📡 استخراج معرفات الجهاز...');
+      final ids = await _ch.invokeMethod<Map>('getDeviceIds', {'packageName': pkg}) ?? {};
+      _gaid  = ids['gaid']?.toString()  ?? '';
+      _afUid = ids['afUid']?.toString() ?? '';
+      if (_gaid.isNotEmpty) _log$('✅ GAID: ${_masked(_gaid)}');
+      else                   _log$('⚠️ GAID: لم يتم الحصول عليه تلقائياً');
+      if (_afUid.isNotEmpty) _log$('✅ AF UID: ${_masked(_afUid)}');
+      else                   _log$('⚠️ AF UID: لم يتم الحصول عليه تلقائياً');
+    } catch (e) {
+      _log$('⚠️ استخراج IDs: $e');
+    }
+  }
+
+  // ── STEP 3: send event ───────────────────────────────────────────────────────
+  Future<void> _sendEvent() async {
+    final game     = _game!;
+    final platform = _platform!;
+
+    // resolve GAID / AF UID (use manual input if auto failed)
+    final gaid  = _gaid.isNotEmpty  ? _gaid  : _gaidCtrl.text.trim();
+    final afUid = _afUid.isNotEmpty ? _afUid : _afUidCtrl.text.trim();
+
+    // validation
+    if (gaid.isEmpty) {
+      _showSnack('أدخل GAID يدوياً أولاً');
+      return;
+    }
+    if (platform == 'af' && afUid.isEmpty) {
+      _showSnack('أدخل AF UID يدوياً أولاً');
+      return;
+    }
+
+    // build event name
     String eventName  = '';
     String eventToken = '';
 
-    if (_useCustomEvent) {
-      eventName  = _customEventCtrl.text.trim();
-      eventToken = _customEventTokenCtrl.text.trim();
-    } else if (_selectedEvent != null) {
+    if (_customLevel) {
+      final lvlStr = _customLevelCtrl.text.trim();
+      final lvl    = int.tryParse(lvlStr);
+      if (lvl == null || lvl <= 0) {
+        _showSnack('أدخل رقم لفل صحيح (مثال: 5)');
+        return;
+      }
+      eventName  = _buildCustomLevelEvent(game, platform, lvl);
+      eventToken = _buildCustomLevelToken(game, platform, lvl);
+      _log$('🎯 لفل مخصص: $eventName');
+    } else {
+      if (_selectedEvent == null) { _showSnack('اختر حدثاً أولاً'); return; }
       eventName  = _selectedEvent!['eventName']  as String? ?? '';
       eventToken = _selectedEvent!['eventToken'] as String? ?? '';
     }
 
-    if (eventName.isEmpty && eventToken.isEmpty) { _addLog('⚠️ لم يتم اختيار حدث'); return false; }
+    setState(() { _phase = _Phase.sending; });
+    _log$('🚀 إرسال: $eventName...');
 
-    final body = <String, dynamic>{ 'platform': platform, 'gaid': _gaid };
-    if (_afUid.isNotEmpty) body['afUid'] = _afUid;
+    // build body
+    final body = <String, dynamic>{ 'platform': platform, 'gaid': gaid };
+    if (afUid.isNotEmpty) body['afUid'] = afUid;
 
     switch (platform) {
       case 'af':
@@ -264,82 +296,116 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
     }
 
     try {
-      final res = await ApiService.post('/games/send-event', body);
-      final sc  = res['_statusCode'] as int? ?? 0;
+      final res  = await ApiService.post('/games/send-event', body);
+      final sc   = res['_statusCode'] as int? ?? res['statusCode'] as int? ?? 0;
+      final code = res['code'] as String? ?? '';
 
-      if (sc == 403 || sc == 401) {
-        final code = res['code'] as String? ?? '';
-        if (code == 'NO_SUBSCRIPTION') {
-          _addLog('🔒 لا يوجد اشتراك نشط. اشترك في باقة أولاً.');
-        } else if (code == 'DAILY_LIMIT_EXCEEDED') {
-          final limit = res['limit'] ?? 0;
-          _addLog('⛔ وصلت للحد اليومي ($limit عملية). حاول غداً.');
-        } else {
-          _addLog('🔒 خطأ مصادقة. يرجى إعادة تسجيل الدخول.');
-        }
-        if (mounted) setState(() => _cancelled = true);
-        return false;
+      if (sc == 403 || sc == 401 || sc == 429) {
+        String msg;
+        if (code == 'NO_SUBSCRIPTION')     msg = '🔒 لا يوجد اشتراك نشط. اشترك في باقة أولاً.';
+        else if (code == 'DAILY_LIMIT_EXCEEDED') msg = '⛔ وصلت للحد اليومي (${res['limit']} عملية). حاول غداً.';
+        else                                msg = '🔒 خطأ مصادقة. يرجى إعادة تسجيل الدخول.';
+        _log$(msg);
+        setState(() { _phase = _Phase.pickEvent; });
+        _showSnack(msg);
+        return;
       }
 
-      if (res['success'] == true) {
-        final sent      = res['eventName'] as String? ?? eventName;
+      final ok = res['success'] == true;
+      final httpCode = res['statusCode'] as int? ?? sc;
+      _log$(ok ? '✅ نجح الإرسال ← HTTP $httpCode' : '❌ فشل: ${res['message'] ?? 'خطأ'}');
+
+      if (ok) {
         final usage     = res['dailyUsage'] as Map<String, dynamic>?;
-        final remaining = usage?['remaining'] ?? '—';
-        _addLog('✅ "$sent" ← HTTP ${res['statusCode']}');
-        _addLog('📊 عمليات متبقية اليوم: $remaining');
-        return true;
+        final remaining = usage?['remaining'];
+        if (remaining != null) _log$('📊 عمليات متبقية اليوم: $remaining');
       }
 
-      _addLog('❌ فشل: ${res['message'] ?? 'خطأ'}');
-      return false;
+      await _loadDailyUsage();
+      setState(() {
+        _phase      = _Phase.done;
+        _resultOk   = ok;
+        _resultMsg  = ok ? '✅ تم إرسال الحدث بنجاح!' : '❌ فشل الإرسال';
+        _resultHttp = httpCode;
+      });
     } catch (e) {
-      _addLog('❌ خطأ شبكة: $e');
-      return false;
+      _log$('❌ خطأ شبكة: $e');
+      setState(() { _phase = _Phase.pickEvent; });
     }
   }
 
-  void _finishRun(bool _) {
-    _countdownTimer?.cancel();
-    final ok = _runSent > 0;
-    if (!mounted) return;
-    setState(() {
-      _phase        = _Phase.done;
-      _resultOk     = ok;
-      _resultBanner = ok ? '✅ تم إرسال $_runSent/$_runTotal حدث بنجاح!' : '❌ فشل الإرسال';
-    });
-    _addLog(_resultBanner);
-    _loadDailyUsage();
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Custom level helpers
+  // ─────────────────────────────────────────────────────────────────────────────
+  /// Builds an event name for a custom level by finding the level pattern
+  /// in existing events and replacing the number.
+  String _buildCustomLevelEvent(Map<String, dynamic> game, String platform, int level) {
+    final events = (game['events'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final lvEvent = events.firstWhere(
+      (e) => (e['eventType'] ?? '').toString().toLowerCase().contains('level') ||
+             (e['eventName'] ?? '').toString().contains(RegExp(r'\d')),
+      orElse: () => <String, dynamic>{},
+    );
+
+    if (lvEvent.isNotEmpty) {
+      final name = (lvEvent['eventName'] as String? ?? '');
+      // Replace first occurrence of a digit-sequence with the custom level
+      if (name.contains(RegExp(r'\d+'))) {
+        return name.replaceFirst(RegExp(r'\d+'), '$level');
+      }
+      // Suffix-style: event name ends without digits → append level
+      return '$name$level';
+    }
+
+    // Fallback
+    return platform == 'singular' ? 'sng_level_achieved_$level' : 'level_$level';
   }
 
-  void _cancelSchedule() {
-    _countdownTimer?.cancel();
-    if (!mounted) return;
-    setState(() => _cancelled = true);
-    _addLog('🛑 تم إيقاف الجدولة');
-    _finishRun(false);
+  /// For ADJ platform: try to find an eventToken from existing events.
+  String _buildCustomLevelToken(Map<String, dynamic> game, String platform, int level) {
+    if (platform != 'adj') return '';
+    final events = (game['events'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    if (events.isNotEmpty) {
+      return events.first['eventToken'] as String? ?? '';
+    }
+    return '';
   }
 
-  void _reset() {
-    _countdownTimer?.cancel();
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Utils
+  // ─────────────────────────────────────────────────────────────────────────────
+  String _platformLabel(String? p) {
+    switch (p) {
+      case 'af':       return 'AppsFlyer';
+      case 'singular': return 'Singular';
+      case 'adj':      return 'Adjust';
+      default:         return p ?? '';
+    }
+  }
+
+  Color _platformColor(String? p) {
+    switch (p) {
+      case 'af':       return const Color(0xFF0077CC);
+      case 'singular': return const Color(0xFF9900CC);
+      case 'adj':      return const Color(0xFFCC6600);
+      default:         return AppTheme.primary;
+    }
+  }
+
+  String _masked(String s) {
+    if (s.length <= 8) return s;
+    return '${s.substring(0, 8)}...';
+  }
+
+  void _showSnack(String msg) {
     if (!mounted) return;
-    setState(() {
-      _phase           = _Phase.idle;
-      _log.clear();
-      _detectedGame    = null;
-      _detectedPlatform = null;
-      _gameEvents      = [];
-      _selectedEvent   = null;
-      _useCustomEvent  = false;
-      _scheduleEnabled = false;
-      _runSent  = 0; _runTotal = 0;
-      _countdownSeconds = 0;
-      _cancelled = false;
-    });
-    _loadDailyUsage();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg, style: const TextStyle(fontFamily: 'Cairo')), backgroundColor: AppTheme.cardBg, behavior: SnackBarBehavior.floating),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // UI
+  // BUILD
   // ═══════════════════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
@@ -351,518 +417,682 @@ class _JumperEngineScreenState extends State<JumperEngineScreen> {
         title: const Row(mainAxisSize: MainAxisSize.min, children: [
           Icon(Icons.bolt, color: AppTheme.primary, size: 20),
           SizedBox(width: 8),
-          Text('محرك الأحداث', style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 18, color: AppTheme.textPrimary)),
+          Text('محرك الأحداث', style: TextStyle(
+            fontFamily: 'Cairo', fontWeight: FontWeight.bold,
+            fontSize: 18, color: AppTheme.textPrimary,
+          )),
         ]),
+        actions: [
+          if (_phase != _Phase.idle && _phase != _Phase.loadingApps && _phase != _Phase.detecting)
+            IconButton(
+              icon: const Icon(Icons.refresh, color: AppTheme.textSecondary),
+              tooltip: 'بدء من جديد',
+              onPressed: _reset,
+            ),
+        ],
       ),
       body: Column(children: [
         if (_dailyUsage != null) _buildUsageBar(),
         Expanded(child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            _buildPhaseUI(),
-            const SizedBox(height: 20),
-            if (_log.isNotEmpty) _buildTerminal(),
+            _buildPhaseContent(),
+            if (_log.isNotEmpty) ...[
+              const SizedBox(height: 18),
+              _buildTerminal(),
+            ],
           ]),
         )),
       ]),
     );
   }
 
-  Widget _buildPhaseUI() {
+  // ── phase router ────────────────────────────────────────────────────────────
+  Widget _buildPhaseContent() {
     switch (_phase) {
       case _Phase.idle:
       case _Phase.loadingApps:
         return _buildIdleCard();
       case _Phase.detecting:
-        return _buildSpinnerCard('🔍 جاري البحث في قاعدة الألعاب...', 'يتم التحقق من جميع المنصات المتاحة');
+        return _buildSpinner('🔍 اكتشاف اللعبة واستخراج المعرفات...', 'يتم فحص المنصة والجهاز في نفس الوقت');
       case _Phase.pickEvent:
-        return _buildEventPickerCard();
-      case _Phase.pickSchedule:
-        return _buildScheduleCard();
-      case _Phase.extractingIds:
-        return _buildSpinnerCard('📡 استخراج معرفات الجهاز...', 'يتطلب صلاحيات الجذر (Root)');
-      case _Phase.running:
-        return _buildRunningCard();
+        return _buildEventPicker();
+      case _Phase.sending:
+        return _buildSpinner('🚀 إرسال الحدث...', 'يرجى الانتظار');
       case _Phase.done:
         return _buildDoneCard();
     }
   }
 
-  // ── Daily usage bar ────────────────────────────────────────────────────────
+  // ── daily usage bar ─────────────────────────────────────────────────────────
   Widget _buildUsageBar() {
     final d = _dailyUsage!;
     if (d['hasSubscription'] != true) {
-      return Container(
-        margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(color: AppTheme.error.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.error.withOpacity(0.3))),
-        child: const Row(children: [
-          Icon(Icons.warning_amber_outlined, color: AppTheme.error, size: 16),
-          SizedBox(width: 8),
-          Text('لا يوجد اشتراك نشط — يرجى الاشتراك في باقة', style: TextStyle(color: AppTheme.error, fontFamily: 'Cairo', fontSize: 12)),
-        ]),
+      return _infoBar(
+        color: AppTheme.error,
+        icon: Icons.warning_amber_outlined,
+        text: 'لا يوجد اشتراك نشط — اشترك في باقة للمتابعة',
       );
     }
     final used      = (d['used']      as num?)?.toInt() ?? 0;
     final limit     = (d['limit']     as num?)?.toInt() ?? 1;
     final remaining = (d['remaining'] as num?)?.toInt() ?? 0;
     final progress  = limit > 0 ? (used / limit).clamp(0.0, 1.0) : 0.0;
-    final barColor  = remaining == 0 ? AppTheme.error : remaining < (limit * 0.2) ? AppTheme.warning : AppTheme.success;
+    final barColor  = remaining == 0
+        ? AppTheme.error
+        : remaining < (limit * 0.2) ? AppTheme.warning : AppTheme.success;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.border),
+      ),
       child: Column(children: [
         Row(children: [
           Icon(Icons.bolt, color: barColor, size: 15),
           const SizedBox(width: 6),
-          Text(d['planName']?.toString() ?? 'باقتك', style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
+          Text(d['planName']?.toString() ?? 'باقتك',
+              style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
           const Spacer(),
-          Text('$used / $limit عملية', style: TextStyle(color: barColor, fontFamily: 'Cairo', fontSize: 12, fontWeight: FontWeight.bold)),
+          Text('$used / $limit عملية',
+              style: TextStyle(color: barColor, fontFamily: 'Cairo', fontSize: 12, fontWeight: FontWeight.bold)),
         ]),
         const SizedBox(height: 6),
-        ClipRRect(borderRadius: BorderRadius.circular(4), child: LinearProgressIndicator(value: progress, backgroundColor: AppTheme.border, valueColor: AlwaysStoppedAnimation(barColor), minHeight: 5)),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            value: progress,
+            backgroundColor: AppTheme.border,
+            valueColor: AlwaysStoppedAnimation(barColor),
+            minHeight: 5,
+          ),
+        ),
       ]),
     );
   }
 
-  // ── Idle card ──────────────────────────────────────────────────────────────
-  Widget _buildIdleCard() {
-    final isLoading = _phase == _Phase.loadingApps;
+  Widget _infoBar({required Color color, required IconData icon, required String text}) {
     return Container(
-      padding: const EdgeInsets.all(28),
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: AppTheme.cardBg, borderRadius: BorderRadius.circular(20),
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(children: [
+        Icon(icon, color: color, size: 16),
+        const SizedBox(width: 8),
+        Expanded(child: Text(text,
+            style: TextStyle(color: color, fontFamily: 'Cairo', fontSize: 12))),
+      ]),
+    );
+  }
+
+  // ── idle card ───────────────────────────────────────────────────────────────
+  Widget _buildIdleCard() {
+    final loading = _phase == _Phase.loadingApps;
+    return Container(
+      padding: const EdgeInsets.all(30),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
         boxShadow: [BoxShadow(color: AppTheme.primary.withOpacity(0.06), blurRadius: 24, offset: const Offset(0, 8))],
       ),
       child: Column(children: [
         Container(
-          width: 70, height: 70,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: AppTheme.primary.withOpacity(0.15), border: Border.all(color: AppTheme.primary.withOpacity(0.4), width: 2)),
-          child: isLoading
-              ? const Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator(color: AppTheme.primary, strokeWidth: 2.5))
-              : const Icon(Icons.search_rounded, color: AppTheme.primary, size: 34),
-        ),
-        const SizedBox(height: 18),
-        Text(isLoading ? 'جاري تحميل التطبيقات...' : 'اكتشاف اللعبة تلقائياً',
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
-        const SizedBox(height: 8),
-        const Text('سيتم فحص التطبيقات المثبتة، تحديد اللعبة،\nاستخراج GAID وإرسال الحدث المختار',
-            textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 13, height: 1.6)),
-        const SizedBox(height: 22),
-        SizedBox(width: double.infinity, child: ElevatedButton.icon(
-          onPressed: isLoading ? null : _startDetection,
-          icon: isLoading
-              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-              : const Icon(Icons.play_circle_outline),
-          label: Text(isLoading ? 'جاري التحميل...' : '🚀 ابدأ الاكتشاف',
-              style: const TextStyle(fontFamily: 'Cairo', fontSize: 15, fontWeight: FontWeight.bold)),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppTheme.primary, disabledBackgroundColor: AppTheme.primary.withOpacity(0.4),
-            foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          width: 76, height: 76,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: AppTheme.primary.withOpacity(0.12),
+            border: Border.all(color: AppTheme.primary.withOpacity(0.4), width: 2),
           ),
-        )),
+          child: loading
+              ? const Padding(padding: EdgeInsets.all(22),
+                  child: CircularProgressIndicator(color: AppTheme.primary, strokeWidth: 2.5))
+              : const Icon(Icons.gamepad_outlined, color: AppTheme.primary, size: 36),
+        ),
+        const SizedBox(height: 20),
+        Text(
+          loading ? 'جاري تحميل التطبيقات...' : 'محرك إرسال الأحداث',
+          style: const TextStyle(
+            fontSize: 18, fontWeight: FontWeight.bold,
+            color: AppTheme.textPrimary, fontFamily: 'Cairo',
+          ),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'يعرض التطبيقات المفتوحة حالياً،\nاختر اللعبة وسيكتشف المنصة ويرسل الحدث تلقائياً',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 13, height: 1.65),
+        ),
+        const SizedBox(height: 26),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: loading ? null : _startFlow,
+            icon: loading
+                ? const SizedBox(width: 18, height: 18,
+                    child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                : const Icon(Icons.play_circle_outline, size: 20),
+            label: Text(loading ? 'جاري التحميل...' : 'عرض التطبيقات المفتوحة',
+                style: const TextStyle(fontFamily: 'Cairo', fontSize: 15, fontWeight: FontWeight.bold)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primary,
+              disabledBackgroundColor: AppTheme.primary.withOpacity(0.4),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            ),
+          ),
+        ),
       ]),
     );
   }
 
-  // ── Spinner card ───────────────────────────────────────────────────────────
-  Widget _buildSpinnerCard(String title, String sub) => Container(
-    padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 20),
-    decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(20), border: Border.all(color: AppTheme.border)),
-    child: Column(children: [
-      const CircularProgressIndicator(color: AppTheme.primary),
-      const SizedBox(height: 16),
-      Text(title, style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 15)),
-      const SizedBox(height: 6),
-      Text(sub, style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
-    ]),
-  );
+  // ── spinner ─────────────────────────────────────────────────────────────────
+  Widget _buildSpinner(String title, String sub) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 20),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(children: [
+        const CircularProgressIndicator(color: AppTheme.primary, strokeWidth: 2.5),
+        const SizedBox(height: 18),
+        Text(title, textAlign: TextAlign.center,
+            style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'Cairo',
+                fontWeight: FontWeight.bold, fontSize: 15)),
+        const SizedBox(height: 6),
+        Text(sub, style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
+      ]),
+    );
+  }
 
-  // ── Event picker ───────────────────────────────────────────────────────────
-  Widget _buildEventPickerCard() {
-    final game     = _detectedGame!;
-    final platform = _detectedPlatform ?? '';
-    final pLabels  = {'af': 'AppsFlyer', 'singular': 'Singular', 'adj': 'Adjust'};
-    final pColors  = {'af': const Color(0xFF0077CC), 'singular': const Color(0xFF9900CC), 'adj': const Color(0xFFCC6600)};
-    final pColor   = pColors[platform] ?? AppTheme.primary;
+  // ── event picker ─────────────────────────────────────────────────────────────
+  Widget _buildEventPicker() {
+    final game     = _game!;
+    final platform = _platform ?? '';
+    final pColor   = _platformColor(platform);
 
-    return Column(children: [
-      // Game info banner
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+
+      // ── Game info card ──────────────────────────────────────────────────────
       Container(
         padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppTheme.success.withOpacity(0.35))),
+        decoration: BoxDecoration(
+          color: AppTheme.cardBg,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppTheme.success.withOpacity(0.35)),
+        ),
         child: Row(children: [
-          Text(game['emoji'] ?? '🎮', style: const TextStyle(fontSize: 30)),
+          Text(game['emoji'] ?? '🎮', style: const TextStyle(fontSize: 32)),
           const SizedBox(width: 12),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(game['displayName'] ?? '', style: const TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontSize: 15)),
-            const SizedBox(height: 4),
+            Text(game['displayName'] ?? '',
+                style: const TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold,
+                    color: AppTheme.textPrimary, fontSize: 15)),
+            const SizedBox(height: 5),
             Wrap(spacing: 6, children: [
-              _badge(pLabels[platform] ?? platform, pColor),
+              _badge(_platformLabel(platform), pColor),
               _badge('✅ تم الكشف', AppTheme.success),
             ]),
           ])),
         ]),
       ),
-      const SizedBox(height: 14),
+      const SizedBox(height: 12),
 
-      // Events
+      // ── IDs section ─────────────────────────────────────────────────────────
+      _buildIdsSection(),
+      const SizedBox(height: 12),
+
+      // ── Events section ──────────────────────────────────────────────────────
       Container(
         padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.border)),
+        decoration: BoxDecoration(
+          color: AppTheme.cardBg,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppTheme.border),
+        ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Row(children: [
             Icon(Icons.bolt, color: AppTheme.accent, size: 17),
             SizedBox(width: 8),
-            Text('اختر الحدث', style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontSize: 15)),
+            Text('اختر الحدث',
+                style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold,
+                    color: AppTheme.textPrimary, fontSize: 15)),
           ]),
           const SizedBox(height: 12),
 
-          ..._gameEvents.map((ev) {
-            final sel = !_useCustomEvent && _selectedEvent == ev;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: InkWell(
-                onTap: () => setState(() { _selectedEvent = ev; _useCustomEvent = false; }),
-                borderRadius: BorderRadius.circular(10),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: sel ? AppTheme.primary.withOpacity(0.12) : Colors.transparent,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: sel ? AppTheme.primary : AppTheme.border),
-                  ),
-                  child: Row(children: [
-                    Icon(ev['isPurchase'] == true ? Icons.shopping_cart_outlined : Icons.videogame_asset_outlined,
-                        color: sel ? AppTheme.primary : AppTheme.textSecondary, size: 18),
-                    const SizedBox(width: 10),
-                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(ev['displayName'] ?? '', style: TextStyle(color: sel ? AppTheme.primary : AppTheme.textPrimary, fontFamily: 'Cairo', fontWeight: FontWeight.w600, fontSize: 13)),
-                      Text(ev['eventName'] ?? ev['eventToken'] ?? '', style: const TextStyle(color: AppTheme.textHint, fontFamily: 'monospace', fontSize: 10)),
-                    ])),
-                    if (ev['isPurchase'] == true) _badge('شراء', AppTheme.warning),
-                    const SizedBox(width: 6),
-                    if (sel) const Icon(Icons.check_circle_rounded, color: AppTheme.primary, size: 18),
-                  ]),
-                ),
-              ),
-            );
-          }),
+          // predefined events
+          ..._events.map((ev) => _buildEventTile(ev)),
 
-          // Custom event
-          const Padding(padding: EdgeInsets.symmetric(vertical: 6), child: Divider(color: AppTheme.border)),
-          InkWell(
-            onTap: () => setState(() => _useCustomEvent = !_useCustomEvent),
-            borderRadius: BorderRadius.circular(10),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              decoration: BoxDecoration(
-                color: _useCustomEvent ? AppTheme.accent.withOpacity(0.1) : Colors.transparent,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: _useCustomEvent ? AppTheme.accent : AppTheme.border.withOpacity(0.6)),
-              ),
-              child: Row(children: [
-                const Icon(Icons.edit_outlined, color: AppTheme.accent, size: 18),
-                const SizedBox(width: 10),
-                const Expanded(child: Text('✏️ حدث مخصص (Custom)', style: TextStyle(color: AppTheme.accent, fontFamily: 'Cairo', fontWeight: FontWeight.w600, fontSize: 13))),
-                Icon(_useCustomEvent ? Icons.expand_less : Icons.expand_more, color: AppTheme.accent),
-              ]),
-            ),
-          ),
-
-          if (_useCustomEvent) Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Column(children: [
-              _inputField(_customEventCtrl, 'اسم الحدث (eventName)', 'my_custom_event'),
-              if (platform == 'adj') ...[
-                const SizedBox(height: 10),
-                _inputField(_customEventTokenCtrl, 'Event Token (Adjust)', 'abc123xyz'),
-              ],
-            ]),
-          ),
-
-          const SizedBox(height: 16),
-          SizedBox(width: double.infinity, child: ElevatedButton(
-            onPressed: (_useCustomEvent && _customEventCtrl.text.trim().isEmpty)
-                ? null
-                : () => setState(() => _phase = _Phase.pickSchedule),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.primary, disabledBackgroundColor: AppTheme.border,
-              foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-            child: const Text('التالي: إعداد الجدولة ←', style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 14)),
-          )),
+          // custom level option
+          _buildCustomLevelTile(),
         ]),
+      ),
+      const SizedBox(height: 16),
+
+      // ── Send button ─────────────────────────────────────────────────────────
+      ElevatedButton.icon(
+        onPressed: _sendEvent,
+        icon: const Icon(Icons.send_rounded, size: 20),
+        label: const Text('إرسال الحدث',
+            style: TextStyle(fontFamily: 'Cairo', fontSize: 15, fontWeight: FontWeight.bold)),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppTheme.primary,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        ),
       ),
     ]);
   }
 
-  // ── Schedule card ──────────────────────────────────────────────────────────
-  Widget _buildScheduleCard() {
-    final eventLabel = _useCustomEvent ? _customEventCtrl.text : (_selectedEvent?['displayName'] ?? '');
-    return Column(children: [
-      // Summary header
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppTheme.border)),
-        child: Row(children: [
-          Text(_detectedGame?['emoji'] ?? '🎮', style: const TextStyle(fontSize: 24)),
-          const SizedBox(width: 10),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(_detectedGame?['displayName'] ?? '', style: const TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontSize: 14)),
-            Text(eventLabel, style: const TextStyle(color: AppTheme.accent, fontFamily: 'Cairo', fontSize: 12)),
-          ])),
-          TextButton(
-            onPressed: () => setState(() => _phase = _Phase.pickEvent),
-            child: const Text('← تغيير', style: TextStyle(fontFamily: 'Cairo', fontSize: 11, color: AppTheme.textSecondary)),
-          ),
-        ]),
+  // ── IDs section: shows found IDs + manual input if missing ─────────────────
+  Widget _buildIdsSection() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.border),
       ),
-      const SizedBox(height: 14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Row(children: [
+          Icon(Icons.fingerprint, color: AppTheme.primary, size: 17),
+          SizedBox(width: 8),
+          Text('معرفات الجهاز',
+              style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold,
+                  color: AppTheme.textPrimary, fontSize: 14)),
+        ]),
+        const SizedBox(height: 10),
 
-      Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.border)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Row(children: [
-            Icon(Icons.schedule_outlined, color: AppTheme.primary, size: 17),
-            SizedBox(width: 8),
-            Text('إعدادات الجدولة', style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontSize: 15)),
-          ]),
-          const SizedBox(height: 16),
+        // GAID
+        _idRow('GAID', _gaid),
+        if (_showManualGaid) ...[
+          const SizedBox(height: 8),
+          _manualField(
+            controller: _gaidCtrl,
+            hint: 'أدخل GAID يدوياً (مطلوب)',
+            label: 'GAID',
+          ),
+        ],
 
-          // Mode selector
-          Row(children: [
-            Expanded(child: _modeCard(Icons.send_rounded,    'إرسال فوري',      'مرة واحدة الآن', !_scheduleEnabled, () => setState(() => _scheduleEnabled = false))),
-            const SizedBox(width: 10),
-            Expanded(child: _modeCard(Icons.repeat_outlined, 'جدولة متكررة',    'أكثر من مرة',     _scheduleEnabled, () => setState(() => _scheduleEnabled = true))),
-          ]),
-
-          if (_scheduleEnabled) ...[
-            const SizedBox(height: 20),
-            const Text('عدد مرات الإرسال', style: TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
+        // AF UID (only for af + singular)
+        if (_platform == 'af' || _platform == 'singular') ...[
+          const SizedBox(height: 8),
+          _idRow('AF UID', _afUid),
+          if (_showManualAfUid) ...[
             const SizedBox(height: 8),
-            Row(children: [
-              _stepBtn(Icons.remove, () => setState(() { if (_scheduleCount > 1) _scheduleCount--; })),
-              const SizedBox(width: 14),
-              Text('$_scheduleCount مرة', style: const TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontSize: 18)),
-              const SizedBox(width: 14),
-              _stepBtn(Icons.add, () => setState(() { if (_scheduleCount < 100) _scheduleCount++; })),
-              const Spacer(),
-              for (final n in [5, 10, 20, 50]) _quickPick(n, _scheduleCount, (v) => setState(() => _scheduleCount = v), AppTheme.primary),
-            ]),
-
-            const SizedBox(height: 16),
-            const Text('الفاصل الزمني (دقائق)', style: TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
-            const SizedBox(height: 8),
-            Row(children: [
-              _stepBtn(Icons.remove, () => setState(() { if (_scheduleInterval > 1) _scheduleInterval--; })),
-              const SizedBox(width: 14),
-              Text('$_scheduleInterval د', style: const TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontSize: 18)),
-              const SizedBox(width: 14),
-              _stepBtn(Icons.add, () => setState(() { if (_scheduleInterval < 60) _scheduleInterval++; })),
-              const Spacer(),
-              for (final n in [5, 10, 15, 30]) _quickPick(n, _scheduleInterval, (v) => setState(() => _scheduleInterval = v), AppTheme.accent),
-            ]),
-
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(color: AppTheme.primary.withOpacity(0.07), borderRadius: BorderRadius.circular(8)),
-              child: Row(children: [
-                const Icon(Icons.info_outline, color: AppTheme.primary, size: 15),
-                const SizedBox(width: 8),
-                Expanded(child: Text(
-                  '$_scheduleCount إرسال × كل $_scheduleInterval دقيقة = مدة إجمالية: ${(_scheduleCount - 1) * _scheduleInterval} دقيقة',
-                  style: const TextStyle(color: AppTheme.primary, fontFamily: 'Cairo', fontSize: 11),
-                )),
-              ]),
+            _manualField(
+              controller: _afUidCtrl,
+              hint: 'أدخل AF UID يدوياً (اختياري)',
+              label: 'AF UID',
             ),
           ],
-
-          const SizedBox(height: 20),
-          SizedBox(width: double.infinity, child: ElevatedButton.icon(
-            onPressed: _startExtractionAndSend,
-            icon: const Icon(Icons.rocket_launch_outlined),
-            label: Text(_scheduleEnabled ? '🚀 بدء الجدولة' : '🚀 إرسال الآن',
-                style: const TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 15)),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.success, foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 15),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-          )),
-        ]),
-      ),
-    ]);
-  }
-
-  // ── Running card ───────────────────────────────────────────────────────────
-  Widget _buildRunningCard() {
-    final progress     = _runTotal > 0 ? (_runSent / _runTotal).clamp(0.0, 1.0) : 0.0;
-    final hasCountdown = _countdownSeconds > 0 && _scheduleEnabled && _runSent < _runTotal;
-    final mins = _countdownSeconds ~/ 60;
-    final secs = _countdownSeconds % 60;
-
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(color: AppTheme.cardBg, borderRadius: BorderRadius.circular(20), border: Border.all(color: AppTheme.primary.withOpacity(0.35))),
-      child: Column(children: [
-        SizedBox(
-          width: 100, height: 100,
-          child: Stack(alignment: Alignment.center, children: [
-            CircularProgressIndicator(value: progress, color: AppTheme.primary, backgroundColor: AppTheme.border, strokeWidth: 7),
-            Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Text('$_runSent', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: AppTheme.textPrimary, fontFamily: 'Cairo')),
-              Text('/ $_runTotal', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary, fontFamily: 'Cairo')),
-            ]),
-          ]),
-        ),
-        const SizedBox(height: 14),
-        Text(_scheduleEnabled ? '🕐 جدولة نشطة...' : '🚀 جاري الإرسال...',
-            style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 15)),
-        if (hasCountdown) ...[
-          const SizedBox(height: 8),
-          Text('الإرسال التالي: ${mins.toString().padLeft(2,'0')}:${secs.toString().padLeft(2,'0')}',
-              style: const TextStyle(color: AppTheme.accent, fontFamily: 'Cairo', fontSize: 14)),
-        ],
-        if (_scheduleEnabled && _runSent < _runTotal) ...[
-          const SizedBox(height: 16),
-          SizedBox(width: double.infinity, child: OutlinedButton.icon(
-            onPressed: _cancelSchedule,
-            icon: const Icon(Icons.stop_circle_outlined, color: AppTheme.error, size: 18),
-            label: const Text('إيقاف الجدولة', style: TextStyle(color: AppTheme.error, fontFamily: 'Cairo')),
-            style: OutlinedButton.styleFrom(side: const BorderSide(color: AppTheme.error), padding: const EdgeInsets.symmetric(vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-          )),
         ],
       ]),
     );
   }
 
-  // ── Done card ──────────────────────────────────────────────────────────────
-  Widget _buildDoneCard() => Container(
-    padding: const EdgeInsets.all(28),
-    decoration: BoxDecoration(
-      color: _resultOk ? AppTheme.success.withOpacity(0.07) : AppTheme.error.withOpacity(0.07),
-      borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: _resultOk ? AppTheme.success.withOpacity(0.4) : AppTheme.error.withOpacity(0.4)),
-    ),
-    child: Column(children: [
-      Icon(_resultOk ? Icons.check_circle_rounded : Icons.cancel_rounded,
-          color: _resultOk ? AppTheme.success : AppTheme.error, size: 60),
-      const SizedBox(height: 12),
-      Text(_resultBanner, textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _resultOk ? AppTheme.success : AppTheme.error, fontFamily: 'Cairo')),
-      const SizedBox(height: 22),
-      SizedBox(width: double.infinity, child: ElevatedButton.icon(
-        onPressed: _reset,
-        icon: const Icon(Icons.refresh_rounded),
-        label: const Text('بدء من جديد', style: TextStyle(fontFamily: 'Cairo', fontWeight: FontWeight.bold)),
-        style: ElevatedButton.styleFrom(backgroundColor: AppTheme.primary, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-      )),
-    ]),
-  );
-
-  // ── Terminal ───────────────────────────────────────────────────────────────
-  Widget _buildTerminal() => Container(
-    padding: const EdgeInsets.all(14),
-    decoration: BoxDecoration(color: const Color(0xFF0D1117), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFF30363D))),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        const Row(children: [
-          _Dot(c: Color(0xFFFF5F56)), SizedBox(width: 5),
-          _Dot(c: Color(0xFFFFBD2E)), SizedBox(width: 5),
-          _Dot(c: Color(0xFF27C93F)),
-        ]),
-        const SizedBox(width: 10),
-        const Expanded(child: Text('Terminal', style: TextStyle(color: Color(0xFF8B949E), fontSize: 11))),
-        GestureDetector(onTap: () => setState(() => _log.clear()), child: const Text('مسح ✕', style: TextStyle(color: Color(0xFF8B949E), fontSize: 11))),
-      ]),
-      const SizedBox(height: 10),
-      ..._log.map((line) {
-        final c = line.contains('✅') || line.contains('🚀') ? const Color(0xFF3FB950)
-            : line.contains('❌') || line.contains('⛔') ? const Color(0xFFF85149)
-            : line.contains('⚠️') || line.contains('🔒') ? const Color(0xFFD29922)
-            : line.contains('📊') || line.contains('📡') ? const Color(0xFF58A6FF)
-            : const Color(0xFFE6EDF3);
-        return Padding(padding: const EdgeInsets.only(bottom: 3), child: Text(line, style: TextStyle(color: c, fontFamily: 'monospace', fontSize: 10.5, height: 1.4)));
-      }),
-    ]),
-  );
-
-  // ── Shared helpers ─────────────────────────────────────────────────────────
-  Widget _badge(String text, Color color) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-    decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(5)),
-    child: Text(text, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)),
-  );
-
-  Widget _modeCard(IconData icon, String label, String sub, bool sel, VoidCallback onTap) => GestureDetector(
-    onTap: onTap,
-    child: AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      padding: const EdgeInsets.all(13),
-      decoration: BoxDecoration(
-        color: sel ? AppTheme.primary.withOpacity(0.12) : Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: sel ? AppTheme.primary : AppTheme.border, width: sel ? 1.5 : 1),
-      ),
-      child: Column(children: [
-        Icon(icon, color: sel ? AppTheme.primary : AppTheme.textHint, size: 22),
-        const SizedBox(height: 5),
-        Text(label, style: TextStyle(color: sel ? AppTheme.primary : AppTheme.textPrimary, fontFamily: 'Cairo', fontWeight: FontWeight.bold, fontSize: 12), textAlign: TextAlign.center),
-        Text(sub, style: const TextStyle(color: AppTheme.textHint, fontFamily: 'Cairo', fontSize: 10), textAlign: TextAlign.center),
-      ]),
-    ),
-  );
-
-  Widget _stepBtn(IconData icon, VoidCallback onTap) => GestureDetector(
-    onTap: onTap,
-    child: Container(
-      width: 32, height: 32,
-      decoration: BoxDecoration(color: AppTheme.border, borderRadius: BorderRadius.circular(8)),
-      child: Icon(icon, color: AppTheme.textPrimary, size: 16),
-    ),
-  );
-
-  Widget _quickPick(int value, int current, ValueChanged<int> onSelect, Color color) => Padding(
-    padding: const EdgeInsets.only(left: 4),
-    child: GestureDetector(
-      onTap: () => onSelect(value),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-        decoration: BoxDecoration(
-          color: current == value ? color.withOpacity(0.18) : Colors.transparent,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: current == value ? color : AppTheme.border),
+  Widget _idRow(String label, String value) {
+    final found = value.isNotEmpty;
+    return Row(children: [
+      Icon(found ? Icons.check_circle_outline : Icons.error_outline,
+          color: found ? AppTheme.success : AppTheme.warning, size: 15),
+      const SizedBox(width: 6),
+      Text('$label: ', style: const TextStyle(color: AppTheme.textSecondary, fontFamily: 'Cairo', fontSize: 12)),
+      Expanded(child: Text(
+        found ? _masked(value) : 'لم يتم الحصول عليه',
+        style: TextStyle(
+          color: found ? AppTheme.textPrimary : AppTheme.warning,
+          fontFamily: 'monospace', fontSize: 11,
+          fontWeight: found ? FontWeight.bold : FontWeight.normal,
         ),
-        child: Text('$value', style: TextStyle(color: current == value ? color : AppTheme.textHint, fontSize: 11, fontFamily: 'Cairo')),
-      ),
-    ),
-  );
+        overflow: TextOverflow.ellipsis,
+      )),
+    ]);
+  }
 
-  Widget _inputField(TextEditingController ctrl, String label, String hint) => TextField(
-    controller: ctrl,
-    onChanged: (_) => setState(() {}),
-    style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'monospace', fontSize: 13),
-    decoration: InputDecoration(
-      labelText: label, hintText: hint,
-      labelStyle: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textSecondary, fontSize: 12),
-      hintStyle: const TextStyle(color: AppTheme.textHint, fontSize: 11),
-    ),
-  );
+  Widget _manualField({required TextEditingController controller, required String hint, required String label}) {
+    return TextField(
+      controller: controller,
+      style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'monospace', fontSize: 13),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: AppTheme.textHint, fontSize: 12, fontFamily: 'Cairo'),
+        labelText: label,
+        labelStyle: const TextStyle(color: AppTheme.textSecondary, fontSize: 12, fontFamily: 'Cairo'),
+        filled: true,
+        fillColor: AppTheme.bg,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppTheme.border)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppTheme.border)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppTheme.primary)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        isDense: true,
+      ),
+    );
+  }
+
+  // ── predefined event tile ───────────────────────────────────────────────────
+  Widget _buildEventTile(Map<String, dynamic> ev) {
+    final selected = !_customLevel && _selectedEvent?['eventName'] == ev['eventName'];
+    return GestureDetector(
+      onTap: () => setState(() { _selectedEvent = ev; _customLevel = false; }),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        decoration: BoxDecoration(
+          color: selected ? AppTheme.primary.withOpacity(0.14) : AppTheme.bg,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? AppTheme.primary : AppTheme.border,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(children: [
+          Icon(selected ? Icons.radio_button_checked : Icons.radio_button_off,
+              color: selected ? AppTheme.primary : AppTheme.textHint, size: 18),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(ev['displayName'] ?? ev['eventName'] ?? '',
+                style: TextStyle(
+                  fontFamily: 'Cairo', fontSize: 13,
+                  color: selected ? AppTheme.primary : AppTheme.textPrimary,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                )),
+            Text(ev['eventName'] ?? '',
+                style: const TextStyle(color: AppTheme.textHint, fontSize: 10, fontFamily: 'monospace')),
+          ])),
+        ]),
+      ),
+    );
+  }
+
+  // ── custom level tile ────────────────────────────────────────────────────────
+  Widget _buildCustomLevelTile() {
+    return GestureDetector(
+      onTap: () => setState(() { _customLevel = true; _selectedEvent = null; }),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        margin: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        decoration: BoxDecoration(
+          color: _customLevel ? AppTheme.accent.withOpacity(0.12) : AppTheme.bg,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: _customLevel ? AppTheme.accent : AppTheme.border,
+            width: _customLevel ? 1.5 : 1,
+          ),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(_customLevel ? Icons.radio_button_checked : Icons.radio_button_off,
+                color: _customLevel ? AppTheme.accent : AppTheme.textHint, size: 18),
+            const SizedBox(width: 10),
+            const Text('لفل مخصص',
+                style: TextStyle(fontFamily: 'Cairo', fontSize: 13,
+                    color: AppTheme.textPrimary, fontWeight: FontWeight.bold)),
+            const SizedBox(width: 6),
+            const Text('أدخل رقم اللفل',
+                style: TextStyle(fontFamily: 'Cairo', fontSize: 11, color: AppTheme.textHint)),
+          ]),
+          if (_customLevel) ...[
+            const SizedBox(height: 10),
+            TextField(
+              controller: _customLevelCtrl,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'Cairo',
+                  fontSize: 18, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+              decoration: InputDecoration(
+                hintText: 'مثال: 5',
+                hintStyle: const TextStyle(color: AppTheme.textHint, fontSize: 16),
+                filled: true,
+                fillColor: AppTheme.bg,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppTheme.accent)),
+                enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppTheme.accent)),
+                focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppTheme.accent, width: 2)),
+                contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                isDense: true,
+                suffixIcon: const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Text('Level', style: TextStyle(color: AppTheme.textHint, fontSize: 11)),
+                ),
+              ),
+              autofocus: true,
+            ),
+            const SizedBox(height: 6),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _customLevelCtrl,
+              builder: (_, val, __) {
+                final lvl = int.tryParse(val.text.trim().isEmpty ? '0' : val.text.trim()) ?? 0;
+                if (lvl <= 0) return const SizedBox.shrink();
+                final preview = _buildCustomLevelEvent(_game!, _platform ?? '', lvl);
+                return Text('📤 سيُرسل: $preview',
+                    style: const TextStyle(color: AppTheme.textHint, fontSize: 11, fontFamily: 'monospace'));
+              },
+            ),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  // ── done card ────────────────────────────────────────────────────────────────
+  Widget _buildDoneCard() {
+    return Column(children: [
+      Container(
+        padding: const EdgeInsets.all(26),
+        decoration: BoxDecoration(
+          color: AppTheme.cardBg,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: (_resultOk ? AppTheme.success : AppTheme.error).withOpacity(0.4),
+          ),
+        ),
+        child: Column(children: [
+          Container(
+            width: 72, height: 72,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: (_resultOk ? AppTheme.success : AppTheme.error).withOpacity(0.12),
+            ),
+            child: Icon(
+              _resultOk ? Icons.check_circle_outline : Icons.error_outline,
+              color: _resultOk ? AppTheme.success : AppTheme.error, size: 38,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(_resultMsg,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 17, fontWeight: FontWeight.bold, fontFamily: 'Cairo',
+                color: _resultOk ? AppTheme.success : AppTheme.error,
+              )),
+          if (_resultHttp != null) ...[
+            const SizedBox(height: 6),
+            Text('HTTP $_resultHttp',
+                style: const TextStyle(color: AppTheme.textHint, fontFamily: 'monospace', fontSize: 12)),
+          ],
+          const SizedBox(height: 22),
+          Row(children: [
+            Expanded(child: OutlinedButton(
+              onPressed: () => setState(() { _phase = _Phase.pickEvent; }),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppTheme.primary,
+                side: const BorderSide(color: AppTheme.primary),
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: const Text('إرسال مجدداً', style: TextStyle(fontFamily: 'Cairo', fontSize: 13)),
+            )),
+            const SizedBox(width: 10),
+            Expanded(child: ElevatedButton(
+              onPressed: _reset,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: const Text('لعبة جديدة', style: TextStyle(fontFamily: 'Cairo', fontSize: 13)),
+            )),
+          ]),
+        ]),
+      ),
+    ]);
+  }
+
+  // ── terminal / log ───────────────────────────────────────────────────────────
+  Widget _buildTerminal() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF050810),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Container(width: 10, height: 10, decoration: BoxDecoration(shape: BoxShape.circle, color: AppTheme.error.withOpacity(0.7))),
+            const SizedBox(width: 6),
+            Container(width: 10, height: 10, decoration: BoxDecoration(shape: BoxShape.circle, color: AppTheme.warning.withOpacity(0.7))),
+            const SizedBox(width: 6),
+            Container(width: 10, height: 10, decoration: BoxDecoration(shape: BoxShape.circle, color: AppTheme.success.withOpacity(0.7))),
+            const SizedBox(width: 10),
+            const Text('سجل العمليات', style: TextStyle(color: AppTheme.textHint, fontSize: 11, fontFamily: 'monospace')),
+          ]),
+          const SizedBox(height: 10),
+          ..._log.map((line) => Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(line, style: const TextStyle(
+              color: Color(0xFF7FD9A0), fontFamily: 'monospace', fontSize: 11, height: 1.45,
+            )),
+          )),
+        ],
+      ),
+    );
+  }
+
+  // ── badge helper ─────────────────────────────────────────────────────────────
+  Widget _badge(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Text(text, style: TextStyle(color: color, fontSize: 10, fontFamily: 'Cairo', fontWeight: FontWeight.bold)),
+    );
+  }
 }
 
-class _Dot extends StatelessWidget {
-  final Color c;
-  const _Dot({required this.c});
+// ─────────────────────────────────────────────────────────────────────────────
+// App picker sheet (separate widget for clean state)
+// ─────────────────────────────────────────────────────────────────────────────
+class _AppPickerSheet extends StatefulWidget {
+  final List<Map<String, dynamic>> apps;
+  const _AppPickerSheet({required this.apps});
   @override
-  Widget build(BuildContext ctx) => Container(width: 10, height: 10, decoration: BoxDecoration(color: c, shape: BoxShape.circle));
+  State<_AppPickerSheet> createState() => _AppPickerSheetState();
+}
+
+class _AppPickerSheetState extends State<_AppPickerSheet> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _query.isEmpty
+        ? widget.apps
+        : widget.apps.where((a) {
+            final name = (a['name'] ?? a['label'] ?? '').toString().toLowerCase();
+            final pkg  = (a['package'] ?? '').toString().toLowerCase();
+            final q    = _query.toLowerCase();
+            return name.contains(q) || pkg.contains(q);
+          }).toList();
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.65, maxChildSize: 0.95, minChildSize: 0.45, expand: false,
+      builder: (_, scroll) => Column(children: [
+        const SizedBox(height: 10),
+        Container(width: 40, height: 4,
+            decoration: BoxDecoration(color: AppTheme.border, borderRadius: BorderRadius.circular(2))),
+        const SizedBox(height: 14),
+        const Text('اختر التطبيق المفتوح',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                color: AppTheme.textPrimary, fontFamily: 'Cairo')),
+        const SizedBox(height: 10),
+
+        // search bar
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: TextField(
+            onChanged: (v) => setState(() => _query = v),
+            style: const TextStyle(color: AppTheme.textPrimary, fontFamily: 'Cairo', fontSize: 13),
+            decoration: InputDecoration(
+              hintText: 'بحث...',
+              hintStyle: const TextStyle(color: AppTheme.textHint, fontFamily: 'Cairo'),
+              prefixIcon: const Icon(Icons.search, color: AppTheme.textHint, size: 18),
+              filled: true,
+              fillColor: AppTheme.bg,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.border)),
+              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.border)),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.primary)),
+              contentPadding: const EdgeInsets.symmetric(vertical: 10),
+              isDense: true,
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        const Divider(color: AppTheme.border, height: 16),
+
+        // app list
+        Expanded(child: filtered.isEmpty
+          ? const Center(child: Text('لا توجد نتائج', style: TextStyle(color: AppTheme.textHint, fontFamily: 'Cairo')))
+          : ListView.builder(
+              controller: scroll,
+              itemCount: filtered.length,
+              itemBuilder: (_, i) {
+                final app = filtered[i];
+                final name = app['name'] ?? app['label'] ?? app['package'] ?? '';
+                return ListTile(
+                  leading: Container(
+                    width: 42, height: 42,
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.gamepad_outlined, color: AppTheme.primary, size: 22),
+                  ),
+                  title: Text(name,
+                      style: const TextStyle(fontFamily: 'Cairo', color: AppTheme.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                  subtitle: Text(app['package'] ?? '',
+                      style: const TextStyle(color: AppTheme.textHint, fontSize: 10, fontFamily: 'monospace')),
+                  onTap: () => Navigator.pop(context, app),
+                );
+              },
+            ),
+        ),
+      ]),
+    );
+  }
 }
