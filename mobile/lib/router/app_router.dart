@@ -17,6 +17,7 @@ import '../screens/admin/admin_users_screen.dart';
 import '../screens/admin/admin_payments_screen.dart';
 import '../screens/admin/admin_settings_screen.dart';
 import '../screens/admin/admin_plans_screen.dart';
+import '../screens/admin/admin_games_screen.dart';
 
 class AppRouter {
   static GoRouter router(AuthProvider auth) {
@@ -33,13 +34,13 @@ class AppRouter {
         return null;
       },
       routes: [
-        GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
+        GoRoute(path: '/login',    builder: (_, __) => const LoginScreen()),
         GoRoute(path: '/register', builder: (_, __) => const RegisterScreen()),
         ShellRoute(
           builder: (context, state, child) => MainShell(child: child),
           routes: [
-            GoRoute(path: '/', builder: (_, __) => const HomeScreen()),
-            GoRoute(path: '/plans', builder: (_, __) => const PlansScreen()),
+            GoRoute(path: '/',       builder: (_, __) => const HomeScreen()),
+            GoRoute(path: '/plans',  builder: (_, __) => const PlansScreen()),
             GoRoute(
               path: '/payment/:planId',
               builder: (_, state) => PaymentScreen(planId: state.pathParameters['planId']!),
@@ -52,13 +53,14 @@ class AppRouter {
               path: '/payment/:paymentId/usdt',
               builder: (_, state) => UsdtPaymentScreen(paymentId: state.pathParameters['paymentId']!),
             ),
-            GoRoute(path: '/engine', builder: (_, __) => const EngineGuardScreen()),
+            GoRoute(path: '/engine',  builder: (_, __) => const EngineGuardScreen()),
             GoRoute(path: '/profile', builder: (_, __) => const ProfileScreen()),
-            GoRoute(path: '/admin', builder: (_, __) => const AdminDashboardScreen()),
-            GoRoute(path: '/admin/users', builder: (_, __) => const AdminUsersScreen()),
-            GoRoute(path: '/admin/payments', builder: (_, __) => const AdminPaymentsScreen()),
-            GoRoute(path: '/admin/settings', builder: (_, __) => const AdminSettingsScreen()),
-            GoRoute(path: '/admin/plans', builder: (_, __) => const AdminPlansScreen()),
+            GoRoute(path: '/admin',            builder: (_, __) => const AdminDashboardScreen()),
+            GoRoute(path: '/admin/users',      builder: (_, __) => const AdminUsersScreen()),
+            GoRoute(path: '/admin/payments',   builder: (_, __) => const AdminPaymentsScreen()),
+            GoRoute(path: '/admin/settings',   builder: (_, __) => const AdminSettingsScreen()),
+            GoRoute(path: '/admin/plans',      builder: (_, __) => const AdminPlansScreen()),
+            GoRoute(path: '/admin/games',      builder: (_, __) => const AdminGamesScreen()),
           ],
         ),
       ],
@@ -76,7 +78,5 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   @override
-  Widget build(BuildContext context) {
-    return widget.child;
-  }
+  Widget build(BuildContext context) => widget.child;
 }

@@ -158,3 +158,38 @@ model UsedTxid {
 
   @@map("used_txids")
 }
+
+// ── Dynamic Games added by admin ─────────────────────────────────────────────
+
+model Game {
+  id          String      @id @default(uuid())
+  name        String
+  displayName String
+  platform    String      // 'af' | 'singular' | 'adj'
+  package     String?
+  devKey      String?
+  appKey      String?
+  appToken    String?
+  emoji       String      @default("🎮")
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  events      GameEvent[]
+
+  @@map("games")
+}
+
+model GameEvent {
+  id          String   @id @default(uuid())
+  gameId      String
+  eventName   String
+  displayName String
+  eventToken  String?
+  isPurchase  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@map("game_events")
+}

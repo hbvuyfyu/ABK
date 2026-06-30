@@ -5,6 +5,10 @@ import {
   getAdminLogs, getAllSubscriptions,
 } from '../controllers/admin.controller';
 import { getAllPlans, createPlan, updatePlan, deletePlan } from '../controllers/plan.controller';
+import {
+  adminListGames, adminCreateGame, adminUpdateGame, adminDeleteGame,
+  adminAddGameEvent, adminDeleteGameEvent,
+} from '../controllers/games.controller';
 import { authenticate, isAdmin } from '../middleware/auth.middleware';
 
 const router = Router();
@@ -24,5 +28,13 @@ router.post('/plans', createPlan);
 router.put('/plans/:id', updatePlan);
 router.delete('/plans/:id', deletePlan);
 router.get('/logs', getAdminLogs);
+
+// Game management
+router.get('/games', adminListGames);
+router.post('/games', adminCreateGame);
+router.put('/games/:id', adminUpdateGame);
+router.delete('/games/:id', adminDeleteGame);
+router.post('/games/:id/events', adminAddGameEvent);
+router.delete('/games/events/:eventId', adminDeleteGameEvent);
 
 export default router;
