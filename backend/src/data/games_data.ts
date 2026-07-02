@@ -224,6 +224,13 @@ export const AF_GAMES: AfGame[] = [
       { eventName: 'power_350w', displayName: 'Power 350w', eventType: 'power', isPurchase: false },
     ],
   },
+  {
+    name: 'raid', displayName: 'Raid', package: 'com.plarium.raidlegends',
+    devKey: 'MGPcVAUzD9XqbwAY6q7KMf', emoji: '⚔️',
+    events: [
+      { eventName: 'Purchase_Daily_Gem_Pack_(9.99$)', displayName: 'Purchase Daily Gem Pack (9.99$)', eventType: 'purchase', isPurchase: true },
+    ],
+  },
 ];
 
 // ==================== Singular Games ====================
